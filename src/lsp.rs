@@ -174,6 +174,18 @@ impl LanguageServer for Backend {
         let Some(markdown) = self
             .with_document(&uri, |doc| {
                 let offset = position_to_offset(&doc.parsed.text, position);
+                if let Some(goal) = doc.parsed.goal_at_offset(offset) {
+                    let goal_name = goal.name.as_deref().unwrap_or("?");
+                    let ctx = if goal.context.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        goal.context.join(", ")
+                    };
+                    return Some(format!(
+                        "**Goal** `{}`\n\n- id: `{}`\n- target: `{}`\n- context: {}",
+                        goal_name, goal.goal_id, goal.target, ctx
+                    ));
+                }
                 let chain = doc.parsed.selection_chain_for_offset(offset);
                 chain.first().map(|span| {
                     format!(
@@ -283,7 +295,7 @@ impl LanguageServer for Backend {
 }
 
 fn to_lsp_diagnostics(parsed: &ParsedDocument) -> Vec<Diagnostic> {
-    parsed
+    let mut diagnostics = parsed
         .diagnostics
         .iter()
         .map(|diag| Diagnostic {
@@ -297,7 +309,43 @@ fn to_lsp_diagnostics(parsed: &ParsedDocument) -> Vec<Diagnostic> {
             tags: None,
             data: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    diagnostics.extend(parsed.goals.iter().map(|goal| {
+        let name = goal.name.as_deref().unwrap_or("?");
+        Diagnostic {
+            range: byte_span_to_range(&parsed.text, goal.span),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "goal.unsolved".into(),
+            )),
+            code_description: None,
+            source: Some("edgelord-lsp".into()),
+            message: format!("Unsolved goal `{name}`"),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }));
+
+    diagnostics.sort_by(|a, b| {
+        let a_key = (
+            a.range.start.line,
+            a.range.start.character,
+            a.range.end.line,
+            a.range.end.character,
+            a.message.as_str(),
+        );
+        let b_key = (
+            b.range.start.line,
+            b.range.start.character,
+            b.range.end.line,
+            b.range.end.character,
+            b.message.as_str(),
+        );
+        a_key.cmp(&b_key)
+    });
+    diagnostics
 }
 
 fn byte_span_to_range(text: &str, span: ByteSpan) -> Range {

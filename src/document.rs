@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 
-use new_surface_syntax::{ParseError, parser, syntax::{SExpr, SExprKind}};
+use new_surface_syntax::{
+    ParseError, parser,
+    syntax::{Atom, SExpr, SExprKind},
+};
 use tower_lsp::lsp_types::TextDocumentContentChangeEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +43,17 @@ struct CstNode {
 pub struct ParsedDocument {
     pub text: String,
     pub diagnostics: Vec<ParseDiagnostic>,
+    pub goals: Vec<Goal>,
     nodes: Vec<CstNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Goal {
+    pub goal_id: String,
+    pub name: Option<String>,
+    pub span: ByteSpan,
+    pub context: Vec<String>,
+    pub target: String,
 }
 
 impl ParsedDocument {
@@ -53,9 +66,11 @@ impl ParsedDocument {
         }];
 
         let mut diagnostics = Vec::new();
+        let mut goals = Vec::new();
 
         match parser::parse_module(&text) {
             Ok(module) => {
+                goals = extract_goals(&module.body);
                 for form in module.body {
                     add_expr_node(&mut nodes, 0, &form);
                 }
@@ -71,6 +86,7 @@ impl ParsedDocument {
         Self {
             text,
             diagnostics,
+            goals,
             nodes,
         }
     }
@@ -108,6 +124,12 @@ impl ParsedDocument {
             }
         }
         deduped
+    }
+
+    pub fn goal_at_offset(&self, offset: usize) -> Option<&Goal> {
+        self.goals
+            .iter()
+            .find(|goal| goal.span.contains_offset(offset))
     }
 }
 
@@ -162,6 +184,94 @@ fn parse_error_span(err: &ParseError, text_len: usize) -> ByteSpan {
         ParseError::UnexpectedEof { .. } => ByteSpan::new(text_len, text_len),
         ParseError::OldParseError(_) => ByteSpan::new(0, 0),
     }
+}
+
+fn extract_goals(forms: &[SExpr]) -> Vec<Goal> {
+    let mut goals = Vec::new();
+    let mut top_level_context = Vec::new();
+
+    for form in forms {
+        collect_holes_in_expr(form, &top_level_context, &mut goals);
+        collect_top_level_bindings(form, &mut top_level_context);
+    }
+
+    goals
+}
+
+fn collect_holes_in_expr(expr: &SExpr, context: &[String], out: &mut Vec<Goal>) {
+    match &expr.kind {
+        SExprKind::Atom(Atom::Symbol(symbol)) if symbol.starts_with('?') => {
+            let name = symbol.strip_prefix('?').map(|s| s.to_string());
+            out.push(Goal {
+                goal_id: goal_id(expr.span.start, expr.span.end, name.as_deref()),
+                name,
+                span: ByteSpan::new(expr.span.start, expr.span.end),
+                context: context.to_vec(),
+                target: "unknown".to_string(),
+            });
+        }
+        SExprKind::List(items) => {
+            if let Some(name) = hole_form_name(items) {
+                out.push(Goal {
+                    goal_id: goal_id(expr.span.start, expr.span.end, Some(name.as_str())),
+                    name: Some(name),
+                    span: ByteSpan::new(expr.span.start, expr.span.end),
+                    context: context.to_vec(),
+                    target: "unknown".to_string(),
+                });
+            }
+            for item in items {
+                collect_holes_in_expr(item, context, out);
+            }
+        }
+        SExprKind::Quote(inner)
+        | SExprKind::QuasiQuote(inner)
+        | SExprKind::Unquote(inner)
+        | SExprKind::UnquoteSplicing(inner) => collect_holes_in_expr(inner, context, out),
+        SExprKind::Atom(_) => {}
+    }
+}
+
+fn hole_form_name(items: &[SExpr]) -> Option<String> {
+    if items.len() < 2 {
+        return None;
+    }
+    let SExprKind::Atom(Atom::Symbol(head)) = &items[0].kind else {
+        return None;
+    };
+    if head != "hole" {
+        return None;
+    }
+    match &items[1].kind {
+        SExprKind::Atom(Atom::Symbol(name)) => Some(name.clone()),
+        _ => Some("anonymous".to_string()),
+    }
+}
+
+fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<String>) {
+    let SExprKind::List(items) = &form.kind else {
+        return;
+    };
+    if items.len() < 2 {
+        return;
+    }
+    let SExprKind::Atom(Atom::Symbol(head)) = &items[0].kind else {
+        return;
+    };
+    if head != "touch" && head != "def" {
+        return;
+    }
+    let SExprKind::Atom(Atom::Symbol(name)) = &items[1].kind else {
+        return;
+    };
+    if !context.contains(name) {
+        context.push(name.clone());
+    }
+}
+
+fn goal_id(start: usize, end: usize, name: Option<&str>) -> String {
+    let n = name.unwrap_or("anon");
+    format!("goal-{start}-{end}-{n}")
 }
 
 pub fn position_to_offset(text: &str, position: tower_lsp::lsp_types::Position) -> usize {
