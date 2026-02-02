@@ -56,6 +56,13 @@ pub struct Goal {
     pub target: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalInlayHint {
+    pub goal_id: String,
+    pub offset: usize,
+    pub label: String,
+}
+
 impl ParsedDocument {
     pub fn parse(text: String) -> Self {
         let text_len = text.len();
@@ -130,6 +137,27 @@ impl ParsedDocument {
         self.goals
             .iter()
             .find(|goal| goal.span.contains_offset(offset))
+    }
+
+    pub fn goal_inlay_hints_in_range(&self, range: ByteSpan) -> Vec<GoalInlayHint> {
+        let mut hints = self
+            .goals
+            .iter()
+            .filter(|goal| spans_intersect(goal.span, range))
+            .map(|goal| GoalInlayHint {
+                goal_id: goal.goal_id.clone(),
+                offset: goal.span.end,
+                label: goal_label(goal, &self.text),
+            })
+            .collect::<Vec<_>>();
+
+        hints.sort_by(|a, b| {
+            a.offset
+                .cmp(&b.offset)
+                .then(a.goal_id.cmp(&b.goal_id))
+                .then(a.label.cmp(&b.label))
+        });
+        hints
     }
 }
 
@@ -272,6 +300,23 @@ fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<String>) {
 fn goal_id(start: usize, end: usize, name: Option<&str>) -> String {
     let n = name.unwrap_or("anon");
     format!("goal-{start}-{end}-{n}")
+}
+
+fn spans_intersect(a: ByteSpan, b: ByteSpan) -> bool {
+    if b.start == b.end {
+        return a.contains_offset(b.start);
+    }
+    a.start < b.end && b.start < a.end
+}
+
+fn goal_label(goal: &Goal, text: &str) -> String {
+    let name = goal.name.as_deref().unwrap_or("?");
+    let slice = text.get(goal.span.start..goal.span.end).unwrap_or_default();
+    if slice.trim_start().starts_with("(hole") {
+        format!("hole {name} : {}", goal.target)
+    } else {
+        format!("?{name} : {}", goal.target)
+    }
 }
 
 pub fn position_to_offset(text: &str, position: tower_lsp::lsp_types::Position) -> usize {

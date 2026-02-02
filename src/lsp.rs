@@ -8,10 +8,11 @@ use tower_lsp::{
         CodeActionOrCommand, CodeActionParams, CodeActionResponse, Diagnostic, DiagnosticSeverity,
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
         DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-        Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-        MessageType, OneOf, Position, PublishDiagnosticsParams, Range, SelectionRange,
-        SelectionRangeParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-        TextDocumentSyncKind, TextDocumentContentChangeEvent, Url, WorkDoneProgressOptions,
+        Hover, HoverContents, HoverParams, InlayHint, InlayHintKind, InlayHintParams,
+        InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf, Position,
+        PublishDiagnosticsParams, Range, SelectionRange, SelectionRangeParams, ServerCapabilities,
+        ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
 };
 
@@ -98,6 +99,7 @@ impl LanguageServer for Backend {
                 code_action_provider: Some(tower_lsp::lsp_types::CodeActionProviderCapability::Simple(
                     true,
                 )),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 diagnostic_provider: Some(tower_lsp::lsp_types::DiagnosticServerCapabilities::Options(
                     tower_lsp::lsp_types::DiagnosticOptions {
                         identifier: Some("edgelord-lsp".into()),
@@ -235,6 +237,36 @@ impl LanguageServer for Backend {
         };
 
         Ok(Some(ranges))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let Some(hints) = self
+            .with_document(&uri, |doc| {
+                let start = position_to_offset(&doc.parsed.text, params.range.start);
+                let end = position_to_offset(&doc.parsed.text, params.range.end);
+                let query = ByteSpan::new(start.min(end), start.max(end));
+                doc.parsed
+                    .goal_inlay_hints_in_range(query)
+                    .into_iter()
+                    .map(|hint| InlayHint {
+                        position: offset_to_position(&doc.parsed.text, hint.offset),
+                        label: hint.label.into(),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: None,
+                        padding_left: Some(true),
+                        padding_right: Some(false),
+                        data: None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(hints))
     }
 
     async fn document_symbol(
