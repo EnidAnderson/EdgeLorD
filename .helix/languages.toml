@@ -7,7 +7,14 @@ args = ["run", "--quiet", "--bin", "edgelord-lsp"]
 [[language]]
 name = "comrade"
 scope = "source.lisp"
+grammar = "scheme"
 file-types = ["comrade"]
 roots = ["Cargo.toml", ".git"]
 auto-format = false
+language-servers = ["edgelord-lsp"]
+
+# Fallback: if Helix resolves a .comrade buffer as Scheme, still attach the server.
+[[language]]
+name = "scheme"
+file-types = ["scm", "ss", "comrade"]
 language-servers = ["edgelord-lsp"]

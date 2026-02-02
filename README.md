@@ -62,3 +62,10 @@ If `cargo run --bin edgelord-lsp` works in this repo, Helix should attach LSP.
 - `space k` for hover
 - `space a` for code actions
 - `space d` for diagnostics picker
+
+### If you see `LSP not defined for the current document`
+
+- Ensure the file ends with `.comrade`.
+- Open Helix from this repo root so `.helix/languages.toml` is discovered.
+- Run `:set-language comrade`, then `:lsp-restart`.
+- If needed, run `:set-language scheme` (fallback wiring also enables LSP there).
