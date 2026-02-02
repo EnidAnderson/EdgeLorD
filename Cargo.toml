@@ -1,0 +1,17 @@
+[package]
+name = "edgelord-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+tower-lsp = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+codeswitch = { path = "../codeswitch" }
+new_surface_syntax = { path = "../clean_kernel/satellites/src/surface_maclane/NewSurfaceSyntaxModule" }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
