@@ -17,8 +17,8 @@ use tower_lsp::{
 };
 
 use crate::document::{
-    ByteSpan, ParsedDocument, apply_content_changes, offset_to_position, position_to_offset,
-    top_level_symbols,
+    Binding, BindingKind, ByteSpan, ParsedDocument, apply_content_changes, offset_to_position,
+    position_to_offset, top_level_symbols,
 };
 
 #[derive(Debug, Clone)]
@@ -178,11 +178,7 @@ impl LanguageServer for Backend {
                 let offset = position_to_offset(&doc.parsed.text, position);
                 if let Some(goal) = doc.parsed.goal_at_offset(offset) {
                     let goal_name = goal.name.as_deref().unwrap_or("?");
-                    let ctx = if goal.context.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        goal.context.join(", ")
-                    };
+                    let ctx = format_context(&goal.context, 8);
                     return Some(format!(
                         "**Goal** `{}`\n\n- id: `{}`\n- target: `{}`\n- context: {}",
                         goal_name, goal.goal_id, goal.target, ctx
@@ -402,6 +398,30 @@ fn chain_to_selection_range(text: &str, chain: &[ByteSpan]) -> SelectionRange {
             range: Range::new(Position::new(0, 0), Position::new(0, 0)),
             parent: None,
         },
+    }
+}
+
+fn format_context(bindings: &[Binding], max_items: usize) -> String {
+    if bindings.is_empty() {
+        return "(empty)".to_string();
+    }
+    let shown = bindings
+        .iter()
+        .take(max_items)
+        .map(|b| format!("{} {}", binding_kind_label(b.kind), b.name))
+        .collect::<Vec<_>>();
+    if bindings.len() > max_items {
+        format!("{}, … +{} more", shown.join(", "), bindings.len() - max_items)
+    } else {
+        shown.join(", ")
+    }
+}
+
+fn binding_kind_label(kind: BindingKind) -> &'static str {
+    match kind {
+        BindingKind::Let => "let",
+        BindingKind::Touch => "touch",
+        BindingKind::Def => "def",
     }
 }
 

@@ -26,8 +26,13 @@ fn goal_context_includes_prior_top_level_bindings() {
         .find(|g| g.name.as_deref() == Some("hole"))
         .expect("goal should exist");
 
-    assert!(goal.context.contains(&"x".to_string()));
-    assert!(goal.context.contains(&"y".to_string()));
+    let names = goal
+        .context
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"x"));
+    assert!(names.contains(&"y"));
 }
 
 #[test]

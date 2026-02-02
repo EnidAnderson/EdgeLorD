@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeSet};
 
 use new_surface_syntax::{
     ParseError, parser,
@@ -52,8 +52,24 @@ pub struct Goal {
     pub goal_id: String,
     pub name: Option<String>,
     pub span: ByteSpan,
-    pub context: Vec<String>,
+    pub context: Vec<Binding>,
     pub target: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BindingKind {
+    Let,
+    Touch,
+    Def,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub name: String,
+    pub kind: BindingKind,
+    pub span: ByteSpan,
+    pub value_preview: Option<String>,
+    pub ty_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,17 +232,23 @@ fn parse_error_span(err: &ParseError, text_len: usize) -> ByteSpan {
 
 fn extract_goals(forms: &[SExpr]) -> Vec<Goal> {
     let mut goals = Vec::new();
-    let mut top_level_context = Vec::new();
+    let mut top_level_bindings = Vec::<Binding>::new();
 
     for form in forms {
-        collect_holes_in_expr(form, &top_level_context, &mut goals);
-        collect_top_level_bindings(form, &mut top_level_context);
+        let mut local_frames = Vec::new();
+        collect_holes_in_expr(form, &mut local_frames, &top_level_bindings, &mut goals);
+        collect_top_level_bindings(form, &mut top_level_bindings);
     }
 
     goals
 }
 
-fn collect_holes_in_expr(expr: &SExpr, context: &[String], out: &mut Vec<Goal>) {
+fn collect_holes_in_expr(
+    expr: &SExpr,
+    local_frames: &mut Vec<Vec<Binding>>,
+    top_level_bindings: &[Binding],
+    out: &mut Vec<Goal>,
+) {
     match &expr.kind {
         SExprKind::Atom(Atom::Symbol(symbol)) if symbol.starts_with('?') => {
             let name = symbol.strip_prefix('?').map(|s| s.to_string());
@@ -234,7 +256,7 @@ fn collect_holes_in_expr(expr: &SExpr, context: &[String], out: &mut Vec<Goal>) 
                 goal_id: goal_id(expr.span.start, expr.span.end, name.as_deref()),
                 name,
                 span: ByteSpan::new(expr.span.start, expr.span.end),
-                context: context.to_vec(),
+                context: merged_context(local_frames, top_level_bindings),
                 target: "unknown".to_string(),
             });
         }
@@ -244,18 +266,32 @@ fn collect_holes_in_expr(expr: &SExpr, context: &[String], out: &mut Vec<Goal>) 
                     goal_id: goal_id(expr.span.start, expr.span.end, Some(name.as_str())),
                     name: Some(name),
                     span: ByteSpan::new(expr.span.start, expr.span.end),
-                    context: context.to_vec(),
+                    context: merged_context(local_frames, top_level_bindings),
                     target: "unknown".to_string(),
                 });
             }
-            for item in items {
-                collect_holes_in_expr(item, context, out);
+            if let Some(frame) = let_bindings(items) {
+                // Traverse let value expression outside local binder scope.
+                if items.len() >= 3 {
+                    collect_holes_in_expr(&items[2], local_frames, top_level_bindings, out);
+                }
+                local_frames.push(frame);
+                for item in items.iter().skip(3) {
+                    collect_holes_in_expr(item, local_frames, top_level_bindings, out);
+                }
+                local_frames.pop();
+            } else {
+                for item in items {
+                    collect_holes_in_expr(item, local_frames, top_level_bindings, out);
+                }
             }
         }
         SExprKind::Quote(inner)
         | SExprKind::QuasiQuote(inner)
         | SExprKind::Unquote(inner)
-        | SExprKind::UnquoteSplicing(inner) => collect_holes_in_expr(inner, context, out),
+        | SExprKind::UnquoteSplicing(inner) => {
+            collect_holes_in_expr(inner, local_frames, top_level_bindings, out)
+        }
         SExprKind::Atom(_) => {}
     }
 }
@@ -276,7 +312,7 @@ fn hole_form_name(items: &[SExpr]) -> Option<String> {
     }
 }
 
-fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<String>) {
+fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<Binding>) {
     let SExprKind::List(items) = &form.kind else {
         return;
     };
@@ -292,8 +328,18 @@ fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<String>) {
     let SExprKind::Atom(Atom::Symbol(name)) = &items[1].kind else {
         return;
     };
-    if !context.contains(name) {
-        context.push(name.clone());
+    if context.iter().all(|b| b.name != *name) {
+        context.push(Binding {
+            name: name.clone(),
+            kind: if head == "touch" {
+                BindingKind::Touch
+            } else {
+                BindingKind::Def
+            },
+            span: ByteSpan::new(items[1].span.start, items[1].span.end),
+            value_preview: None,
+            ty_preview: None,
+        });
     }
 }
 
@@ -317,6 +363,67 @@ fn goal_label(goal: &Goal, text: &str) -> String {
     } else {
         format!("?{name} : {}", goal.target)
     }
+}
+
+fn let_bindings(items: &[SExpr]) -> Option<Vec<Binding>> {
+    if items.len() < 4 {
+        return None;
+    }
+    let SExprKind::Atom(Atom::Symbol(head)) = &items[0].kind else {
+        return None;
+    };
+    if head != "let" {
+        return None;
+    }
+
+    let mut bindings = Vec::new();
+    match &items[1].kind {
+        SExprKind::Atom(Atom::Symbol(name)) => bindings.push(Binding {
+            name: name.clone(),
+            kind: BindingKind::Let,
+            span: ByteSpan::new(items[1].span.start, items[1].span.end),
+            value_preview: None,
+            ty_preview: None,
+        }),
+        SExprKind::List(names) => {
+            for name_expr in names {
+                if let SExprKind::Atom(Atom::Symbol(name)) = &name_expr.kind {
+                    bindings.push(Binding {
+                        name: name.clone(),
+                        kind: BindingKind::Let,
+                        span: ByteSpan::new(name_expr.span.start, name_expr.span.end),
+                        value_preview: None,
+                        ty_preview: None,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    if bindings.is_empty() {
+        return None;
+    }
+    Some(bindings)
+}
+
+fn merged_context(local_frames: &[Vec<Binding>], top_level_bindings: &[Binding]) -> Vec<Binding> {
+    let mut context = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for frame in local_frames.iter().rev() {
+        for binding in frame {
+            if seen.insert(binding.name.clone()) {
+                context.push(binding.clone());
+            }
+        }
+    }
+    for binding in top_level_bindings {
+        if seen.insert(binding.name.clone()) {
+            context.push(binding.clone());
+        }
+    }
+
+    context
 }
 
 pub fn position_to_offset(text: &str, position: tower_lsp::lsp_types::Position) -> usize {
