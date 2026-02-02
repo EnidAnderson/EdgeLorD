@@ -42,3 +42,23 @@ If your local rustup has no default toolchain configured, set one first:
 ```bash
 rustup default stable
 ```
+
+## Helix (project-local setup)
+
+This repo now includes `.helix/languages.toml` so Helix can start `edgelord-lsp`
+for `*.comrade` files without global editor config.
+
+### Try it
+
+```bash
+hx path/to/file.comrade
+```
+
+If `cargo run --bin edgelord-lsp` works in this repo, Helix should attach LSP.
+
+### Quick checks in Helix
+
+- `:lsp-restart` to restart the language server after code changes
+- `space k` for hover
+- `space a` for code actions
+- `space d` for diagnostics picker
