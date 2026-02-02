@@ -8,18 +8,15 @@ use tower_lsp::lsp_types::{Position, Range, TextDocumentContentChangeEvent};
 fn utf16_position_offset_roundtrip_is_stable() {
     let text = "(def x \"a😀b\")\n(def y x)\n";
 
-    let points = [
-        Position::new(0, 0),
-        Position::new(0, 9),
-        Position::new(0, 10),
-        Position::new(0, 12),
-        Position::new(1, 3),
-    ];
+    let mut offsets = vec![0usize, text.len()];
+    offsets.extend(text.char_indices().map(|(idx, _)| idx));
+    offsets.sort_unstable();
+    offsets.dedup();
 
-    for pos in points {
-        let offset = position_to_offset(text, pos);
-        let roundtrip = offset_to_position(text, offset);
-        assert_eq!(roundtrip, pos, "failed at {:?}", pos);
+    for offset in offsets {
+        let pos = offset_to_position(text, offset);
+        let roundtrip = position_to_offset(text, pos);
+        assert_eq!(roundtrip, offset, "failed at offset {}", offset);
     }
 }
 
@@ -43,6 +40,40 @@ fn incremental_changes_apply_deterministically() {
     let out_b = apply_content_changes(base, &changes);
     assert_eq!(out_a, out_b);
     assert_eq!(out_a, ";; header\n(begin (def z y))\n");
+}
+
+#[test]
+fn incremental_changes_respect_input_order() {
+    let base = "(def)\n";
+    let first_then_second = vec![
+        TextDocumentContentChangeEvent {
+            range: Some(Range::new(Position::new(0, 4), Position::new(0, 4))),
+            range_length: None,
+            text: " x".to_string(),
+        },
+        TextDocumentContentChangeEvent {
+            range: Some(Range::new(Position::new(0, 4), Position::new(0, 4))),
+            range_length: None,
+            text: " y".to_string(),
+        },
+    ];
+    let second_then_first = vec![
+        TextDocumentContentChangeEvent {
+            range: Some(Range::new(Position::new(0, 4), Position::new(0, 4))),
+            range_length: None,
+            text: " y".to_string(),
+        },
+        TextDocumentContentChangeEvent {
+            range: Some(Range::new(Position::new(0, 4), Position::new(0, 4))),
+            range_length: None,
+            text: " x".to_string(),
+        },
+    ];
+
+    let out_a = apply_content_changes(base, &first_then_second);
+    let out_b = apply_content_changes(base, &second_then_first);
+    assert_eq!(out_a, "(def y x)\n");
+    assert_eq!(out_b, "(def x y)\n");
 }
 
 #[test]

@@ -11,7 +11,7 @@ use tower_lsp::{
         Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
         MessageType, OneOf, Position, PublishDiagnosticsParams, Range, SelectionRange,
         SelectionRangeParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        TextDocumentSyncKind, TextDocumentContentChangeEvent, Url, WorkDoneProgressOptions,
     },
 };
 
@@ -184,6 +184,7 @@ impl LanguageServer for Backend {
                 })
             })
             .await
+            .flatten()
         else {
             return Ok(None);
         };

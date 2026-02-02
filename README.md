@@ -1,6 +1,6 @@
 # EdgelorD LSP
 
-![EdgelorD Logo](EdgeLorD.png)
+![EdgeLorD Logo](EdgeLorD.png)
 
 `edgelord-lsp` is an editor-agnostic LSP 3.17 proof assistant server for Comrade Lisp.
 

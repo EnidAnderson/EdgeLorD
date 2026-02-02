@@ -224,6 +224,7 @@ pub fn offset_to_position(text: &str, offset: usize) -> tower_lsp::lsp_types::Po
 pub fn apply_content_changes(text: &str, changes: &[TextDocumentContentChangeEvent]) -> String {
     let mut out = text.to_string();
     for change in changes {
+        // LSP content changes are applied in the order received.
         if let Some(range) = change.range {
             let start = position_to_offset(&out, range.start);
             let end = position_to_offset(&out, range.end);
