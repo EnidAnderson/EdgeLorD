@@ -46,7 +46,7 @@ rustup default stable
 ## Helix (project-local setup)
 
 This repo now includes `.helix/languages.toml` so Helix can start `edgelord-lsp`
-for `*.comrade` files without global editor config.
+for `*.comrade` and `*.maclane` files without global editor config.
 
 ### Try it
 
