@@ -41,6 +41,8 @@ fn goal_lookup_by_offset_works() {
     let parsed = ParsedDocument::parse(text.to_string());
     let offset = text.find("?h").expect("hole marker must exist");
 
-    let goal = parsed.goal_at_offset(offset).expect("goal at offset must exist");
+    let goal = parsed
+        .goal_at_offset(offset)
+        .expect("goal at offset must exist");
     assert_eq!(goal.name.as_deref(), Some("h"));
 }

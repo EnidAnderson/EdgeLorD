@@ -6,7 +6,11 @@ fn let_binder_is_visible_inside_body() {
     let parsed = ParsedDocument::parse(text.to_string());
     let goal = parsed.goals.first().expect("goal must exist");
 
-    let names = goal.context.iter().map(|b| b.name.as_str()).collect::<Vec<_>>();
+    let names = goal
+        .context
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect::<Vec<_>>();
     assert!(names.contains(&"x"));
 }
 
