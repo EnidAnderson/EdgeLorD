@@ -50,6 +50,7 @@ pub struct ParsedDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub goal_id: String,
+    pub stable_id: Option<String>,
     pub name: Option<String>,
     pub span: ByteSpan,
     pub context: Vec<Binding>,
@@ -190,7 +191,7 @@ fn node_order(nodes: &[CstNode]) -> impl FnMut(&usize, &usize) -> Ordering + '_ 
 }
 
 fn add_expr_node(nodes: &mut Vec<CstNode>, parent: usize, expr: &SExpr) -> usize {
-    let span = ByteSpan::new(expr.span.start, expr.span.end);
+    let span = expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
     let id = nodes.len();
     nodes.push(CstNode {
         span,
@@ -224,8 +225,9 @@ fn parse_error_span(err: &ParseError, text_len: usize) -> ByteSpan {
         | ParseError::InvalidNumber { span }
         | ParseError::MismatchedDelimiter { span, .. }
         | ParseError::IllegalUnquote { span }
-        | ParseError::IllegalSplice { span } => ByteSpan::new(span.start, span.end),
+        | ParseError::IllegalSplice { span } => span.as_ref().map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
         ParseError::UnexpectedEof { .. } => ByteSpan::new(text_len, text_len),
+        ParseError::InternalError { .. } => ByteSpan::new(0, 0),
         ParseError::OldParseError(_) => ByteSpan::new(0, 0),
     }
 }
@@ -250,12 +252,13 @@ fn collect_holes_in_expr(
     out: &mut Vec<Goal>,
 ) {
     match &expr.kind {
-        SExprKind::Atom(Atom::Symbol(symbol)) if symbol.starts_with('?') => {
-            let name = symbol.strip_prefix('?').map(|s| s.to_string());
+        SExprKind::Atom(Atom::Symbol(name)) if name.starts_with('?') => {
+            // Unbound variable starting with ? is a hole
             out.push(Goal {
-                goal_id: goal_id(expr.span.start, expr.span.end, name.as_deref()),
-                name,
-                span: ByteSpan::new(expr.span.start, expr.span.end),
+                goal_id: goal_id(expr.span.map(|s| s.start).unwrap_or(0), expr.span.map(|s| s.end).unwrap_or(0), Some(name.as_str())),
+                stable_id: None,
+                name: Some(name.clone()),
+                span: expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
                 context: merged_context(local_frames, top_level_bindings),
                 target: "unknown".to_string(),
             });
@@ -263,9 +266,10 @@ fn collect_holes_in_expr(
         SExprKind::List(items) => {
             if let Some(name) = hole_form_name(items) {
                 out.push(Goal {
-                    goal_id: goal_id(expr.span.start, expr.span.end, Some(name.as_str())),
+                    goal_id: goal_id(expr.span.map(|s| s.start).unwrap_or(0), expr.span.map(|s| s.end).unwrap_or(0), Some(name.as_str())),
+                    stable_id: None,
                     name: Some(name),
-                    span: ByteSpan::new(expr.span.start, expr.span.end),
+                    span: expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
                     context: merged_context(local_frames, top_level_bindings),
                     target: "unknown".to_string(),
                 });
@@ -336,7 +340,7 @@ fn collect_top_level_bindings(form: &SExpr, context: &mut Vec<Binding>) {
             } else {
                 BindingKind::Def
             },
-            span: ByteSpan::new(items[1].span.start, items[1].span.end),
+            span: items[1].span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
             value_preview: None,
             ty_preview: None,
         });
@@ -381,7 +385,7 @@ fn let_bindings(items: &[SExpr]) -> Option<Vec<Binding>> {
         SExprKind::Atom(Atom::Symbol(name)) => bindings.push(Binding {
             name: name.clone(),
             kind: BindingKind::Let,
-            span: ByteSpan::new(items[1].span.start, items[1].span.end),
+            span: items[1].span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
             value_preview: None,
             ty_preview: None,
         }),
@@ -391,7 +395,7 @@ fn let_bindings(items: &[SExpr]) -> Option<Vec<Binding>> {
                     bindings.push(Binding {
                         name: name.clone(),
                         kind: BindingKind::Let,
-                        span: ByteSpan::new(name_expr.span.start, name_expr.span.end),
+                        span: name_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0)),
                         value_preview: None,
                         ty_preview: None,
                     });
@@ -521,16 +525,16 @@ pub fn top_level_symbols(text: &str) -> Vec<(String, ByteSpan)> {
 
     let mut out = Vec::new();
     for form in module.body {
-        let span = ByteSpan::new(form.span.start, form.span.end);
+        let span = form.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
         let label = match &form.kind {
             SExprKind::List(items) => match items.first() {
                 Some(head) => match &head.kind {
-                    SExprKind::Atom(atom) => format!("{:?}", atom),
+                    SExprKind::Atom(atom) => format!("{}", atom),
                     _ => "list".to_string(),
                 },
                 None => "list".to_string(),
             },
-            SExprKind::Atom(atom) => format!("{:?}", atom),
+            SExprKind::Atom(atom) => format!("{}", atom),
             SExprKind::Quote(_) => "quote".to_string(),
             SExprKind::QuasiQuote(_) => "quasiquote".to_string(),
             SExprKind::Unquote(_) => "unquote".to_string(),

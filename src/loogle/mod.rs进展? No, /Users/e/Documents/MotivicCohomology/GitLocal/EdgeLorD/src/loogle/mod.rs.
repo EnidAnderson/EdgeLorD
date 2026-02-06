@@ -1,0 +1,40 @@
+use tantivy::schema::*;
+use tantivy::{Index, IndexWriter, ReloadPolicy};
+use std::sync::Arc;
+use crate::proposal::{Proposal, ProposalKind, ProposalStatus, EvidenceSummary};
+
+pub struct LoogleIndex {
+    index: Index,
+    schema: Schema,
+}
+
+impl LoogleIndex {
+    pub fn new_in_memory() -> tantivy::Result<Self> {
+        let mut schema_builder = Schema::builder();
+        schema_builder.add_text_field("path", STRING | STORED);
+        schema_builder.add_text_field("fingerprint", STRING | STORED);
+        schema_builder.add_text_field("doc", TEXT | STORED);
+        schema_builder.add_text_field("doctrine", STRING | STORED);
+        
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema.clone())?;
+        
+        Ok(Self { index, schema })
+    }
+
+    pub fn index_lemma(&self, path: &str, fingerprint: &str, doc: &str) -> tantivy::Result<()> {
+        let mut index_writer = self.index.writer(50_000_000)?;
+        let path_field = self.schema.get_field("path").unwrap();
+        let fp_field = self.schema.get_field("fingerprint").unwrap();
+        let doc_field = self.schema.get_field("doc").unwrap();
+        
+        index_writer.add_document(tantivy::doc!(
+            path_field => path,
+            fp_field => fingerprint,
+            doc_field => doc,
+        ))?;
+        
+        index_writer.commit()?;
+        Ok(())
+    }
+}

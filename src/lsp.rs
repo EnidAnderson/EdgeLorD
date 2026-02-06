@@ -20,12 +20,17 @@ use tower_lsp::{
         ServerInfo, TextDocumentContentChangeEvent,
         TextDocumentSyncCapability,
         TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        ExecuteCommandParams, ExecuteCommandOptions, // Added imports
     },
 };
 
 use crate::document::{
     Binding, BindingKind, ByteSpan, ParsedDocument, offset_to_position, position_to_offset,
     top_level_symbols,
+};
+use crate::tactics::{
+    ActionSafety, Selection, TacticLimits, TacticRegistry, TacticRequest,
+    stdlib::register_std_tactics,
 };
 use crate::proof_session::{ProofSession, ProofSessionOpenResult, ProofSessionUpdateResult};
 // Removed ClientSink imports
@@ -34,6 +39,7 @@ use new_surface_syntax::comrade_workspace::WorkspaceReport;
 use new_surface_syntax::{
     ComradeWorkspace, ContentChange, SurfaceError, WorkspaceDiagnosticSeverity,
     workspace_diagnostic_from_surface_error,
+    diagnostics::pretty::{PrinterRegistry, PrettyCtx}, // Added PrettyCtx
 };
 
 const EXTERNAL_COMMAND_TIMEOUT_MS: u64 = 5000;
@@ -55,6 +61,7 @@ pub struct Config {
     pub debounce_interval_ms: u64,
     pub log_level: String,
     pub external_command: Option<Vec<String>>,
+    pub pretty_dialect: Option<String>,
 }
 
 impl Default for Config {
@@ -63,6 +70,7 @@ impl Default for Config {
             debounce_interval_ms: DEFAULT_DEBOUNCE_INTERVAL_MS,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             external_command: DEFAULT_EXTERNAL_COMMAND.map(|s| vec![s.to_owned()]),
+            pretty_dialect: None,
         }
     }
 }
@@ -232,7 +240,8 @@ fn diagnostic_sort_key<'a>(
     diag: &'a Diagnostic,
 ) -> (
     &'a str,
-    u8,
+    u8, // Reliability score: 0 for spanned, 1 for spanless
+    u8, // Severity rank
     u32,
     u32,
     u32,
@@ -241,8 +250,10 @@ fn diagnostic_sort_key<'a>(
     String,
     &'a str,
 ) {
+    let reliability = if diag.range.start.line == 0 && diag.range.start.character == 0 && diag.range.end.line == 0 && diag.range.end.character == 0 { 1 } else { 0 };
     (
         uri.as_str(),
+        reliability,
         severity_rank(diag.severity),
         diag.range.start.line,
         diag.range.start.character,
@@ -350,6 +361,7 @@ pub fn workspace_error_report(err: &SurfaceError) -> WorkspaceReport {
         fingerprint: None,
         revision: 0,
         bundle: None,
+        proof_state: None,
     }
 }
 
@@ -419,12 +431,23 @@ pub struct Backend {
     proof_session: Arc<RwLock<ProofSession>>,
     config: Arc<RwLock<Config>>,
     did_change_tx: mpsc::Sender<DebouncedDocumentChange>,
+    registry: Arc<PrinterRegistry>, // NEW: server-wide printer registry
+    tactic_registry: Arc<TacticRegistry>, // NEW: tactic engine
 }
 
 impl Backend {
     pub fn new(client: Client, config: Arc<RwLock<Config>>) -> Self { // Changed client type
         let (did_change_tx, did_change_rx) = mpsc::channel(100);
         let proof_session_arc = Arc::new(RwLock::new(ProofSession::new(client.clone(), config.clone())));
+        
+        // Initialize printer registry once at startup
+        let registry = Arc::new(PrinterRegistry::new_with_defaults());
+
+        // Initialize tactic registry
+        let mut tactic_registry = TacticRegistry::new();
+        register_std_tactics(&mut tactic_registry);
+        let tactic_registry = Arc::new(tactic_registry);
+
         tokio::spawn(process_debounced_proof_session_events(
             proof_session_arc.clone(),
             config.clone(), // Pass config directly
@@ -436,6 +459,8 @@ impl Backend {
             proof_session: proof_session_arc,
             config: config, // Use 'config' here
             did_change_tx,
+            registry,
+            tactic_registry,
         }
     }
 } // End of impl Backend
@@ -526,7 +551,7 @@ impl LanguageServer for Backend {
         self.client
             .log_message(
                 MessageType::INFO,
-                format!("Server initialized with config: {:?}", *config).to_string(),
+                format!("Server initialized with config: {:?}", *config).to_string(), // Debug OK
             )
             .await;
         Ok(InitializeResult {
@@ -559,6 +584,12 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["edgelord/goals".to_string(), "edgelord/explain".to_string()],
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                }),
                 ..ServerCapabilities::default()
             },
         })
@@ -631,7 +662,7 @@ impl LanguageServer for Backend {
                     .log_message(
                         MessageType::INFO,
                         format!(
-                            "Running external command on save for {}: {:?}",
+                            "Running external command on save for {}: {:?}", // Debug OK
                             uri, cmd_args
                         ).to_string(),
                     )
@@ -669,39 +700,52 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        let markdown_content_option: Option<String> = {
-            let proof_session = self.proof_session.read().await;
-            if let Some(doc) = proof_session.get_parsed_document(&uri) {
-                let offset = position_to_offset(&doc.text, position);
-                let mut content = String::new();
-                if let Some(goal) = doc.goal_at_offset(offset) {
-                    let goal_name = goal.name.as_deref().unwrap_or("?");
-                    let ctx = format_context(&goal.context, 8);
-                    content.push_str(&format!(
-                        "**Goal** `{}`\n\n- id: `{}`\n- target: `{}`\n- context: {}",
-                        goal_name, goal.goal_id, goal.target, ctx
-                    ));
-                }
-                if let Some(span) = doc.selection_chain_for_offset(offset).first() {
-                    if !content.is_empty() {
-                        content.push_str("\n\n---\n\n");
+        let markdown_content_option = {
+            let session = self.proof_session.read().await;
+            if let Some(proof) = session.get_proof_state(&uri) {
+                 let offset = position_to_offset(&session.get_parsed_document(&uri).unwrap().text, position);
+                 if let Some(goal) = proof.goals.iter().find(|g| g.span.map_or(false, |s| s.start <= offset && offset <= s.end)) {
+                    // Create pretty context
+                    let config = self.config.read().await;
+                    let dialect = config.pretty_dialect.as_deref()
+                        .map(|s| match s {
+                            "pythonic" => new_surface_syntax::diagnostics::pretty::PrettyDialect::Pythonic,
+                             "canonical" => new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical,
+                            _ => new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical,
+                        })
+                        .unwrap_or(new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical);
+                    
+                    let files = new_surface_syntax::diagnostics::DiagnosticContext::new("hover_dummy".to_string(), ""); // Dummy for now, ideally populated
+                    let ctx = crate::edgelord_pretty_ctx::EdgeLordPrettyCtx::new(
+                        &self.registry,
+                        dialect,
+                        new_surface_syntax::diagnostics::pretty::PrettyLimits::hover_default(),
+                        proof,
+                        &files,
+                        &uri,
+                    );
+
+                    // Render goal view
+                    let view = ctx.printer().render_goal(&ctx, goal);
+                    
+                    // Format markdown
+                    let mut md = format!("### {}\n\n**Status**: {}\n\n", view.title, view.status_line);
+                    for detail in view.details {
+                        md.push_str(&format!("- {}\n", detail));
                     }
-                    content.push_str(&format!("Focused span: [{}..{}]", span.start, span.end));
-                }
-                if content.is_empty() {
-                    None
+                    
+                    // Version footer
+                    let version = session.get_document_version(&uri).unwrap_or(0);
+                    md.push_str(&format!("\n\n---\n_v{}_", version));
+                    
+                    Some(md)
                 } else {
-                    let last_analyzed_duration = proof_session.get_last_analyzed_time(&uri)
-                                                    .map(|t| t.elapsed().as_millis())
-                                                    .unwrap_or(0);
-                    let version = proof_session.get_document_version(&uri).unwrap_or(0);
-                    let footer = format!("\n\n---\n\n_Document Version: {}, Last Analyzed: {}ms ago_", version, last_analyzed_duration);
-                    content.push_str(&footer);
-                    Some(content)
+                    None
                 }
             } else {
                 None
             }
+
         };
         Ok(markdown_content_option.map(|md| Hover {
             contents: HoverContents::Markup(tower_lsp::lsp_types::MarkupContent {
@@ -712,44 +756,139 @@ impl LanguageServer for Backend {
         }))
     }
 
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+        if params.command == "edgelord/goals" {
+            let args = params.arguments;
+            if args.is_empty() {
+                 return Err(tower_lsp::jsonrpc::Error::invalid_params("Missing arguments"));
+            }
+            // Expecting first argument to be { "textDocument": { "uri": "..." } } or just "uri_string"
+            // Let's support an object with textDocument field for standard compliance, 
+            // or a simple string for ease of testing.
+            
+            let uri_str: String = if let Some(obj) = args[0].as_object() {
+                if let Some(td) = obj.get("textDocument") {
+                    td.get("uri").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        .ok_or(tower_lsp::jsonrpc::Error::invalid_params("Missing uri in textDocument"))?
+                } else if let Some(u) = obj.get("uri") {
+                     u.as_str().map(|s| s.to_string())
+                         .ok_or(tower_lsp::jsonrpc::Error::invalid_params("Missing uri field"))?
+                } else {
+                     return Err(tower_lsp::jsonrpc::Error::invalid_params("Invalid argument structure"));
+                }
+            } else if let Some(s) = args[0].as_str() {
+                s.to_string()
+            } else {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params("Invalid argument type"));
+            };
+            
+            let uri = Url::parse(&uri_str)
+                .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid URI format"))?;
+                
+            let response = self.proof_session.read().await.compute_goals_panel(&uri);
+            
+            match response {
+                Some(resp) => {
+                    let json = serde_json::to_value(resp).map_err(|e| {
+                         tower_lsp::jsonrpc::Error {
+                             code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                             message: format!("Serialization error: {}", e).into(),
+                             data: None
+                         }
+                    })?;
+                    Ok(Some(json))
+                },
+                None => Ok(None) // or error if document not found?
+            }
+        } else if params.command == "edgelord/explain" {
+            // Parse ExplainRequest from arguments
+            let args = params.arguments;
+            if args.is_empty() {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params("Missing arguments"));
+            }
+            
+            // Deserialize ExplainRequest from first argument
+            let req: crate::explain::view::ExplainRequest = serde_json::from_value(args[0].clone())
+                .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid ExplainRequest: {}", e)))?;
+            
+            // Call handler
+            let view = crate::explain::handle_explain_request(req, self.proof_session.clone()).await?;
+            
+            // Serialize response
+            let json = serde_json::to_value(view).map_err(|e| {
+                tower_lsp::jsonrpc::Error {
+                    code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                    message: format!("Failed to serialize explain response: {}", e).into(),
+                    data: None,
+                }
+            })?;
+            
+            Ok(Some(json))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
         let range = params.range;
-        let actions = {
-            let proof_session = self.proof_session.read().await;
-            if let Some(doc) = proof_session.get_parsed_document(&uri) {
-                let text = &doc.text;
-                let start_offset = position_to_offset(text, range.start);
-                let end_offset = position_to_offset(text, range.end);
-                let selected_text = text.get(start_offset..end_offset).ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("invalid range"))?;
-                let new_text = format!("(quote {})", selected_text);
-                let text_edit = tower_lsp::lsp_types::TextEdit {
-                    range,
-                    new_text,
-                };
-                let mut changes = HashMap::new();
-                changes.insert(uri.clone(), vec![text_edit]);
-                let edit = tower_lsp::lsp_types::WorkspaceEdit {
-                    changes: Some(changes),
-                    document_changes: None,
-                    change_annotations: None,
-                };
-                let code_action = tower_lsp::lsp_types::CodeAction {
-                    title: "Wrap in (quote ...)".to_string(),
-                    kind: Some(tower_lsp::lsp_types::CodeActionKind::REFACTOR_REWRITE),
+
+        let session = self.proof_session.read().await;
+        let doc = session
+            .get_document(&uri)
+            .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+
+        let proof_state = doc.workspace_report.proof_state.as_ref();
+        if proof_state.is_none() {
+            return Ok(None);
+        }
+        let proof_state = proof_state.unwrap();
+
+        let dialect = self.config.read().await.pretty_dialect.as_deref()
+            .map(|s| match s {
+                "pythonic" => new_surface_syntax::diagnostics::pretty::PrettyDialect::Pythonic,
+                _ => new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical,
+            })
+            .unwrap_or(new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical);
+
+        let files = new_surface_syntax::diagnostics::DiagnosticContext::new(uri.to_string(), "");
+        let pretty_ctx = crate::edgelord_pretty_ctx::EdgeLordPrettyCtx::new(
+            &self.registry,
+            dialect,
+            new_surface_syntax::diagnostics::pretty::PrettyLimits::hover_default(),
+            proof_state,
+            &files,
+            &uri,
+        );
+
+        let req = TacticRequest {
+            ctx: &pretty_ctx,
+            proof: proof_state,
+            doc: &doc.parsed,
+            index: doc.goals_index.as_ref(),
+            selection: Selection { range },
+            limits: TacticLimits::default(),
+        };
+
+        let actions = self.tactic_registry.compute_all(&req);
+
+        let response = actions
+            .into_iter()
+            .map(|a| {
+                CodeActionOrCommand::CodeAction(tower_lsp::lsp_types::CodeAction {
+                    title: a.title,
+                    kind: Some(map_tactic_kind(a.kind)),
                     diagnostics: None,
-                    edit: Some(edit),
+                    edit: Some(a.edit),
                     command: None,
-                    is_preferred: Some(false),
+                    is_preferred: Some(a.safety == ActionSafety::Safe),
                     disabled: None,
                     data: None,
-                };
-                Some(vec![CodeActionOrCommand::CodeAction(code_action)])
-            } else {
-                None
-            }
-        };
-        Ok(actions)
+                })
+            })
+            .collect();
+
+        Ok(Some(response))
     }
 
     async fn selection_range(
@@ -780,32 +919,61 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
-        let hints = {
-            let proof_session = self.proof_session.read().await;
-            if let Some(doc) = proof_session.get_parsed_document(&uri) {
-                let start = position_to_offset(&doc.text, params.range.start);
-                let end = position_to_offset(&doc.text, params.range.end);
-                let query = ByteSpan::new(start.min(end), start.max(end));
-                Some(
-                    doc.goal_inlay_hints_in_range(query)
-                        .into_iter()
-                        .map(|hint| InlayHint {
-                            position: offset_to_position(&doc.text, hint.offset),
-                            label: hint.label.into(),
-                            kind: Some(InlayHintKind::TYPE),
-                            text_edits: None,
-                            tooltip: None,
-                            padding_left: Some(true),
-                            padding_right: Some(false),
-                            data: None,
+        let range = params.range;
+        
+        let hints_result = {
+            let session = self.proof_session.read().await;
+            if let Some(proof) = session.get_proof_state(&uri) {
+                // Initialize context
+                let config = self.config.read().await;
+                let dialect = config.pretty_dialect.as_deref()
+                        .map(|s| match s {
+                            "pythonic" => new_surface_syntax::diagnostics::pretty::PrettyDialect::Pythonic,
+                             "canonical" => new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical,
+                            _ => new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical,
                         })
-                        .collect::<Vec<_>>(),
-                )
+                        .unwrap_or(new_surface_syntax::diagnostics::pretty::PrettyDialect::Canonical);
+                
+                let files = new_surface_syntax::diagnostics::DiagnosticContext::new("hover_dummy".to_string(), "");
+                let ctx = crate::edgelord_pretty_ctx::EdgeLordPrettyCtx::new(
+                    &self.registry,
+                    dialect,
+                    new_surface_syntax::diagnostics::pretty::PrettyLimits::inlay_default(),
+                    proof,
+                    &files,
+                    &uri,
+                );
+
+                let mut hints = Vec::new();
+                let doc_text = &session.get_parsed_document(&uri).unwrap().text;
+                let start_offset = position_to_offset(doc_text, range.start);
+                let end_offset = position_to_offset(doc_text, range.end);
+
+                for goal in &proof.goals {
+                     if let Some(span) = goal.span {
+                         if span.start >= start_offset && span.end <= end_offset {
+                             let view = ctx.printer().render_goal(&ctx, goal);
+                             
+                             let position = offset_to_position(doc_text, span.end);
+                             hints.push(InlayHint {
+                                     position,
+                                     label: tower_lsp::lsp_types::InlayHintLabel::String(format!(": {}", view.title)),
+                                     kind: Some(InlayHintKind::TYPE),
+                                     text_edits: None,
+                                     tooltip: Some(tower_lsp::lsp_types::InlayHintTooltip::String(view.status_line)),
+                                     padding_left: Some(true),
+                                     padding_right: Some(true),
+                                     data: None,
+                                 });
+                         }
+                     }
+                }
+                Some(hints)
             } else {
                 None
             }
         };
-        Ok(hints)
+        Ok(hints_result)
     }
 
     async fn document_symbol(
@@ -865,6 +1033,16 @@ impl LanguageServer for Backend {
     }
 }
 
+fn map_tactic_kind(kind: crate::tactics::view::ActionKind) -> tower_lsp::lsp_types::CodeActionKind {
+    use crate::tactics::view::ActionKind;
+    match kind {
+        ActionKind::QuickFix => tower_lsp::lsp_types::CodeActionKind::QUICKFIX,
+        ActionKind::Refactor => tower_lsp::lsp_types::CodeActionKind::REFACTOR,
+        ActionKind::Rewrite => tower_lsp::lsp_types::CodeActionKind::REFACTOR_REWRITE,
+        ActionKind::Explain => tower_lsp::lsp_types::CodeActionKind::new("edgelord.explain"),
+        ActionKind::Expand => tower_lsp::lsp_types::CodeActionKind::REFACTOR_INLINE,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -880,17 +1058,20 @@ mod tests {
                     span: Some(Span::new(0, 1)),
                     severity: WorkspaceDiagnosticSeverity::Warning,
                     code: Some("macro"),
+                    notes: vec![],
                 },
                 WorkspaceDiagnostic {
                     message: "alpha".into(),
                     span: Some(Span::new(1, 2)),
                     severity: WorkspaceDiagnosticSeverity::Error,
                     code: Some("parse"),
+                    notes: vec![],
                 },
             ],
             fingerprint: None,
             revision: 0,
             bundle: None,
+            proof_state: None,
         }
     }
     #[test]
@@ -914,6 +1095,7 @@ mod tests {
             fingerprint: None,
             revision: 0,
             bundle: None,
+            proof_state: None,
         };
         let parsed = ParsedDocument::parse("(touch x)".to_string());
         let uri = Url::parse("file:///test.tld").unwrap(); // Dummy URL for testing

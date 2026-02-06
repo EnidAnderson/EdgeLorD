@@ -15,6 +15,7 @@ new_surface_syntax = { path = "../clean_kernel/satellites/src/surface_maclane/Ne
  # Updated to match observed version in cargo test output
 
 async-trait = "0.1.89"
+tantivy = "0.22"
 
 [dev-dependencies]
 pretty_assertions = "1.4"
