@@ -833,6 +833,330 @@ The systemic work is complete when:
 
 ---
 
+## Phase 2: Structured Diagnostics (World-Class UX)
+
+**Based on:** DIAGNOSTICS_AND_UX_PLAN.md §10 (Implementation Plan with Gates)
+
+**Scope:** Kernel diagnostics + LSP integration
+**Depends on:** Kernel proof-state (Gates 0-7 complete)
+**Rule:** Diagnostics are pure views over ProofState; never rescan CoreForms for holes
+
+---
+
+### Phase 2 Gate 1: Diagnostic Types + Pretty-Printer Foundation
+
+**Task #P2-1** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 1
+
+**Goal:** Add core diagnostic types and Wadler-Lindig `Doc` pretty-printer model.
+
+**New Files:**
+- `new_surface_syntax/src/diagnostic.rs` (~400 lines)
+- `new_surface_syntax/src/pretty.rs` (~300 lines)
+
+**Types to Implement:**
+```rust
+// diagnostic.rs
+pub struct StructuredDiagnostic { ... }
+pub enum DiagnosticCode { ... }  // ML-{PHASE}-{NUMBER}
+pub struct LabeledSpan { ... }
+pub struct QuickFix { ... }
+pub struct TextEdit { ... }
+pub enum Severity { Error, Warning, Information, Hint }
+
+// pretty.rs
+pub enum Doc { ... }  // Wadler-Lindig model
+pub fn render(doc: &Doc, width: usize) -> String
+pub fn render_flat(doc: &Doc) -> String
+pub fn sexpr_to_doc(expr: &SExpr) -> Doc
+```
+
+**Action Items:**
+- [ ] Implement all diagnostic types in `diagnostic.rs`
+- [ ] Implement `Doc` pretty-printer model in `pretty.rs`
+- [ ] Implement `sexpr_to_doc()` printer
+- [ ] Add unit tests: `DiagnosticCode::as_str()` format
+- [ ] Add unit test: all codes unique (registry iteration)
+- [ ] Add snapshot tests: 5 representative S-expressions
+- [ ] Add unit tests: `Doc::render()` handles empty/single/multi-line
+
+**Success Criteria:**
+- `cargo check -p new_surface_syntax` passes
+- All existing tests still pass
+- 8+ new tests pass
+
+**Estimated Effort:** 10-12 hours
+
+---
+
+### Phase 2 Gate 2: Term Printers
+
+**Task #P2-2** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 2
+
+**Goal:** Add pretty-printers for all term types.
+
+**Files to Modify:**
+- `new_surface_syntax/src/pretty.rs` (extend)
+
+**Printers to Implement:**
+```rust
+pub fn core_form_to_doc(form: &CoreForm) -> Doc
+pub fn morphism_term_to_doc(term: &MorphismTerm) -> Doc
+pub fn scope_to_doc(scope: &Scope) -> Doc
+pub fn context_to_doc(context: &LocalContext) -> Doc
+pub fn compiled_rule_to_doc(rule: &CompiledRule) -> Doc
+pub fn meta_to_doc(meta: &Meta) -> Doc
+```
+
+**Action Items:**
+- [ ] Implement `core_form_to_doc()`
+- [ ] Implement `morphism_term_to_doc()`
+- [ ] Implement `scope_to_doc()`
+- [ ] Implement `context_to_doc()`
+- [ ] Implement `compiled_rule_to_doc()`
+- [ ] Implement `meta_to_doc()`
+- [ ] Add snapshot tests: 5 tests per printer (empty/atom/nested/wide/narrow)
+- [ ] Add unit tests: compact mode produces single line
+- [ ] Add determinism tests: same input → same output
+
+**Success Criteria:**
+- 25+ snapshot tests pass
+- Compact mode verified for all printers
+- Determinism verified
+
+**Estimated Effort:** 12-15 hours
+
+---
+
+### Phase 2 Gate 3: Error-to-Diagnostic Conversion
+
+**Task #P2-3** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 3
+
+**Goal:** Convert all error types to `StructuredDiagnostic`. Replace `WorkspaceDiagnostic`.
+
+**Files to Modify:**
+- `src/error.rs` (add `to_diagnostic()` to all error types)
+- `src/elaborate.rs` (Reject paths)
+- `src/comrade_workspace.rs` (replace WorkspaceDiagnostic)
+- `src/mini_backend.rs` (add MiniError `to_diagnostic()`)
+- `src/lib.rs` (export new types)
+
+**Error Types to Convert:**
+```rust
+impl ParseError { pub fn to_diagnostic(&self) -> StructuredDiagnostic { ... } }
+impl MacroError { pub fn to_diagnostic(&self) -> StructuredDiagnostic { ... } }
+impl ElaborationError { pub fn to_diagnostic(&self) -> StructuredDiagnostic { ... } }
+impl SurfaceError { pub fn to_diagnostic(&self) -> StructuredDiagnostic { ... } }
+impl MiniError { pub fn to_diagnostic(&self) -> StructuredDiagnostic { ... } }
+```
+
+**Action Items:**
+- [ ] Add `to_diagnostic()` to ParseError (all variants)
+- [ ] Add `to_diagnostic()` to MacroError (all variants)
+- [ ] Add `to_diagnostic()` to ElaborationError (all variants)
+- [ ] Add `to_diagnostic()` to SurfaceError (wrapper)
+- [ ] Add `to_diagnostic()` to MiniError (all variants)
+- [ ] Replace WorkspaceDiagnostic with StructuredDiagnostic in WorkspaceReport
+- [ ] Remove `workspace_diagnostic_from_surface_error` function
+- [ ] Update all WorkspaceReport construction sites
+- [ ] Add unit tests: every variant produces valid diagnostic
+- [ ] Add unit test: no `{:?}` in titles
+- [ ] Add unit test: no `Span::new(0, 0)` in diagnostics
+- [ ] Add snapshot tests: 10 representative conversions
+
+**Success Criteria:**
+- All existing tests pass (with WorkspaceDiagnostic migration)
+- 28+ error variants have `to_diagnostic()`
+- 12+ new tests pass
+
+**Estimated Effort:** 15-20 hours
+
+---
+
+### Phase 2 Gate 4: Fix Macro Expansion Spans
+
+**Task #P2-4** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 4
+
+**Goal:** Thread `invocation_span` through macro expansion. Remove all fake (0,0) spans.
+
+**Files to Modify:**
+- `src/expand.rs` (thread invocation_span through apply_template)
+
+**Action Items:**
+- [ ] Add `invocation_span: Span` parameter to `apply_template`
+- [ ] Thread span through all template construction
+- [ ] Update all call sites to pass invocation span
+- [ ] Remove all `Span::new(0, 0)` from expansion
+- [ ] Add unit tests: expansion errors have valid spans
+- [ ] Verify all existing expand tests pass
+- [ ] Add CI grep check: `Span::new(0, 0)` returns 0 hits (outside test code)
+
+**Success Criteria:**
+- No fake spans in macro expansion
+- All existing tests pass
+- CI grep check passes
+
+**Estimated Effort:** 6-8 hours
+
+---
+
+### Phase 2 Gate 5: Lint Framework
+
+**Task #P2-5** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 5
+
+**Goal:** Add `Lint` trait, `LintConfig`, and 7 built-in lints.
+
+**New File:**
+- `new_surface_syntax/src/lint.rs` (~600 lines)
+
+**Files to Modify:**
+- `src/comrade_workspace.rs` (add `lint_diagnostics` to WorkspaceReport)
+- `src/lib.rs` (export LintConfig)
+
+**Lints to Implement:**
+1. `UnusedTouch` — touch without corresponding def
+2. `ShadowedDefinition` — def shadows outer scope binding
+3. `UnsolvedGoal` — information diagnostic for unsolved holes
+4. `InconsistentGoal` — warning for conflicted goals
+5. `UnusedImport` — imported module not referenced
+6. `DeprecatedSyntax` — old syntax patterns
+7. `StyleConsistency` — naming conventions
+
+**Action Items:**
+- [ ] Implement `Lint` trait
+- [ ] Implement `LintConfig` with severity overrides
+- [ ] Implement `run_lints()` orchestrator
+- [ ] Implement 7 built-in lints
+- [ ] Add `lint_diagnostics: Vec<StructuredDiagnostic>` to WorkspaceReport
+- [ ] Wire lints into `typed_elaborate_query` or workspace report path
+- [ ] Add 3 tests per lint (positive/negative/false-positive) = 21 tests
+- [ ] Add unit test: `run_lints` with all disabled → empty vec
+- [ ] Add unit test: LintConfig overrides work
+
+**Success Criteria:**
+- 23+ lint tests pass
+- All existing tests pass
+- Lints integrated into compilation pipeline
+
+**Estimated Effort:** 18-22 hours
+
+---
+
+### Phase 2 Gate 6: EdgeLorD Structured Diagnostics
+
+**Task #P2-6** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 6
+
+**Goal:** Update EdgeLorD to consume `StructuredDiagnostic` and map to LSP.
+
+**Files to Modify (EdgeLorD crate):**
+- `src/lsp.rs` (all diagnostic mapping)
+- `src/proof_session.rs` (WorkspaceReport handling)
+
+**Action Items:**
+- [ ] Replace `workspace_report_to_diagnostics` with structured mapping
+- [ ] Implement `structured_to_lsp()` converter
+- [ ] Implement `quick_fix_to_code_action()` converter
+- [ ] Update `document_diagnostics_from_report()`
+- [ ] Update `code_action` handler to include quick fixes
+- [ ] Update `workspace_error_report` for new WorkspaceReport shape
+- [ ] Remove old WorkspaceDiagnostic mapping code
+- [ ] Update proof_session.rs for new fields
+- [ ] Add unit test: `structured_to_lsp` produces correct fields
+- [ ] Add unit test: quick fixes produce valid code actions
+- [ ] Add integration test: didOpen → publishDiagnostics with structured fields
+
+**Success Criteria:**
+- All EdgeLorD tests pass
+- Integration test verifies LSP structured fields
+- Quick fixes appear in code actions
+
+**Estimated Effort:** 12-15 hours
+
+---
+
+### Phase 2 Gate 7: Hover and Explain Upgrades
+
+**Task #P2-7** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 7
+
+**Goal:** Upgrade hover to use pretty-printers. Add "Explain this error" code action.
+
+**Files to Modify (EdgeLorD crate):**
+- `src/lsp.rs` (hover, code actions)
+
+**Action Items:**
+- [ ] Rewrite `hover()` to use pretty-printers
+- [ ] Add `scope_at_cursor()` helper
+- [ ] Implement "Explain this error" code action handler
+- [ ] Add scope visualization to hover output
+- [ ] Add snapshot tests: 5 hover outputs with representative programs
+- [ ] Add unit test: explain action produces well-formatted output
+- [ ] Add unit test: scope visualization shows correct bindings
+- [ ] Manual verification in Helix
+
+**Success Criteria:**
+- All tests pass
+- Hover shows pretty-printed context
+- Explain action works for ≥5 error types
+- Manual Helix verification successful
+
+**Estimated Effort:** 10-12 hours
+
+---
+
+### Phase 2 Gate 8: Snapshot Test Harness and CI
+
+**Task #P2-8** — per DIAGNOSTICS_AND_UX_PLAN.md §10 Gate 8
+
+**Goal:** Add `insta` dependency and comprehensive snapshot test suite. Add CI enforcement.
+
+**Files to Modify:**
+- `new_surface_syntax/Cargo.toml` (add `insta` dev-dependency)
+- `edgelord-lsp/Cargo.toml` (add `insta` dev-dependency)
+- `tests/` (new snapshot test files)
+- CI config (add enforcement scripts)
+
+**Action Items:**
+- [ ] Add `insta` to both crates
+- [ ] Add snapshot tests for all printers (20+ tests)
+- [ ] Add snapshot tests for all diagnostic conversions (20+ tests)
+- [ ] Add snapshot tests for hover outputs (10+ tests)
+- [ ] Add CI grep: `Span::new\(0.*0\)` returns 0 non-test hits
+- [ ] Add CI grep: `\{:\?\}` in error files returns 0 hits
+- [ ] Add CI test: all diagnostic codes unique
+- [ ] Add CI: `cargo insta test` passes
+
+**Success Criteria:**
+- 50+ snapshot tests across both crates
+- All CI checks pass
+- No snapshot regressions
+
+**Estimated Effort:** 10-12 hours
+
+---
+
+### Phase 2 Definition of Done
+
+Per DIAGNOSTICS_AND_UX_PLAN.md §11.4:
+
+- [ ] All 28+ error variants have `to_diagnostic()` implementations
+- [ ] All diagnostics use `DiagnosticCode` (no raw strings)
+- [ ] All diagnostics follow style guide (enforced by test)
+- [ ] Pretty-printers exist for: SExpr, CoreForm, MorphismTerm, scope, context, CompiledRule, Meta
+- [ ] All 7 lints implemented with 3+ tests each
+- [ ] EdgeLorD maps structured diagnostics to LSP with related_information
+- [ ] Quick fixes produce valid code actions
+- [ ] "Explain this error" code action works for ≥5 error types
+- [ ] Hover shows pretty-printed context (not raw strings)
+- [ ] 50+ snapshot tests pass
+- [ ] CI grep for fake spans returns 0 hits
+- [ ] CI grep for Debug dumps in error messages returns 0 hits
+- [ ] All diagnostic codes are unique (test passes)
+- [ ] Performance budgets met (≤50ms for ≤1000-line file)
+- [ ] Manual verification in Helix: diagnostics appear with codes, hover shows rich context, code actions include quick fixes
+
+**Total Phase 2 Estimated Effort:** 93-116 hours (2-3 weeks)
+
+---
+
 ## References
 
 - **Authoritative plan:** kernel_proof_state_elaboration_plan_v2.md
@@ -840,4 +1164,4 @@ The systemic work is complete when:
 - **Completed plan:** HOLE_OCCURRENCE_IMPLEMENTATION_PLAN.md (v3 final)
 - **Meta-guide:** implementation_guide_plan_ordering.md
 
-**Next step:** Begin with Task #4 (Phase 0) or Task #5 (Gate 0).
+**Next step:** Begin Phase 2 Gate 1 (Diagnostic Types + Pretty-Printer Foundation).
