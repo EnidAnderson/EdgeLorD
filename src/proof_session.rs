@@ -50,15 +50,22 @@ pub struct ProofSession {
     config: Arc<RwLock<Config>>,
     workspace: ComradeWorkspace,
     documents: BTreeMap<Url, ProofDocument>,
+    loogle_indexer: Arc<crate::loogle::WorkspaceIndexer>,
 }
 
 impl ProofSession {
     pub fn new(client: Client, config: Arc<RwLock<Config>>) -> Self { // Changed client type
+        let loogle_indexer = Arc::new(
+            crate::loogle::WorkspaceIndexer::new()
+                .expect("Failed to initialize Loogle indexer")
+        );
+        
         Self {
             client,
             config,
             workspace: ComradeWorkspace::new(),
             documents: BTreeMap::new(),
+            loogle_indexer,
         }
     }
 
@@ -95,6 +102,16 @@ impl ProofSession {
                 proof_state: ps.clone(),
                 goals_index: index.clone(),
             });
+        }
+
+        // Reindex workspace for Loogle if bundle is available
+        if let Some(ref bundle) = report.bundle {
+            if let Err(e) = self.loogle_indexer.reindex(bundle) {
+                self.client.log_message(
+                    MessageType::WARNING,
+                    format!("Loogle indexing failed: {}", e)
+                ).await;
+            }
         }
 
         self.documents.insert(uri, ProofDocument {
@@ -179,6 +196,16 @@ impl ProofSession {
             }
         }
 
+        // Reindex workspace for Loogle if bundle is available
+        if let Some(ref bundle) = report.bundle {
+            if let Err(e) = self.loogle_indexer.reindex(bundle) {
+                self.client.log_message(
+                    MessageType::WARNING,
+                    format!("Loogle indexing failed: {}", e)
+                ).await;
+            }
+        }
+
         self.documents.insert(uri, ProofDocument {
             version,
             parsed,
@@ -204,6 +231,10 @@ impl ProofSession {
             .get(uri)
             .map(|doc| doc.parsed.goals.clone())
             .unwrap_or_default()
+    }
+
+    pub fn loogle_index(&self) -> &crate::loogle::WorkspaceIndexer {
+        &self.loogle_indexer
     }
 
     pub async fn apply_command(&mut self, uri: Url, _command: String) -> ProofSessionUpdateResult {

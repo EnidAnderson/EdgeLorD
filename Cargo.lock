@@ -314,9 +314,11 @@ dependencies = [
  "serde_json",
  "source_span",
  "tantivy",
+ "tcb_core",
  "thiserror 2.0.18",
  "tokio",
  "tower-lsp",
+ "uuid",
 ]
 
 [[package]]
