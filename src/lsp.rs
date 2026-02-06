@@ -872,7 +872,7 @@ impl LanguageServer for Backend {
 
         let actions = self.tactic_registry.compute_all(&req);
 
-        let response = actions
+        let mut response: Vec<_> = actions
             .into_iter()
             .map(|a| {
                 CodeActionOrCommand::CodeAction(tower_lsp::lsp_types::CodeAction {
@@ -887,6 +887,20 @@ impl LanguageServer for Backend {
                 })
             })
             .collect();
+
+        // Add Loogle lemma suggestions
+        let loogle_actions = crate::loogle::generate_loogle_actions(
+            session.loogle_index(),
+            proof_state,
+            range,
+            &uri,
+        );
+        
+        response.extend(
+            loogle_actions
+                .into_iter()
+                .map(CodeActionOrCommand::CodeAction)
+        );
 
         Ok(Some(response))
     }

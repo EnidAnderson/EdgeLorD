@@ -121,7 +121,9 @@ pub struct LoogleResult {
 
 pub mod indexer;
 pub mod applicability;
+pub mod code_actions;
 
 pub use indexer::WorkspaceIndexer;
 pub use applicability::{ApplicabilityResult, LemmaPayload, check_applicability, to_proposal};
+pub use code_actions::generate_loogle_actions;
 
