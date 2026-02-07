@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration, collections::HashMap};
+use std::{sync::Arc, time::Duration};
 // Removed async_trait import
 use serde::{Deserialize, Serialize};
 // Removed serde_json::Value import
@@ -16,11 +16,14 @@ use tower_lsp::{
         DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
         Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
         InlayHint, InlayHintKind, InlayHintParams, MessageType, NumberOrString, OneOf, Position,
-        PublishDiagnosticsParams, Range, SelectionRange, SelectionRangeParams, ServerCapabilities,
+        Range, SelectionRange, SelectionRangeParams, ServerCapabilities,
         ServerInfo, TextDocumentContentChangeEvent,
         TextDocumentSyncCapability,
         TextDocumentSyncKind, Url, WorkDoneProgressOptions,
-        ExecuteCommandParams, ExecuteCommandOptions, // Added imports
+        ExecuteCommandParams, ExecuteCommandOptions,
+        SemanticTokensParams, SemanticTokensResult, SemanticTokens, 
+        SemanticTokensLegend, SemanticTokensServerCapabilities, SemanticTokensOptions, 
+        SemanticTokensFullOptions,
     },
 };
 
@@ -37,10 +40,11 @@ use crate::proof_session::{ProofSession, ProofSessionOpenResult, ProofSessionUpd
 
 use new_surface_syntax::comrade_workspace::WorkspaceReport;
 use new_surface_syntax::{
-    ComradeWorkspace, ContentChange, SurfaceError, WorkspaceDiagnosticSeverity,
+    ContentChange, SurfaceError, WorkspaceDiagnosticSeverity,
     workspace_diagnostic_from_surface_error,
     diagnostics::pretty::{PrinterRegistry, PrettyCtx}, // Added PrettyCtx
 };
+use sniper_db::SniperDatabase;
 
 const EXTERNAL_COMMAND_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_DEBOUNCE_INTERVAL_MS: u64 = 250;
@@ -327,33 +331,7 @@ fn chain_to_selection_range(text: &str, chain: &[ByteSpan]) -> SelectionRange {
     }
 }
 
-fn format_context(bindings: &[Binding], max_items: usize) -> String {
-    if bindings.is_empty() {
-        return "(empty)".to_string();
-    }
-    let shown = bindings
-        .iter()
-        .take(max_items)
-        .map(|b| format!("{} {}", binding_kind_label(b.kind), b.name))
-        .collect::<Vec<_>>();
-    if bindings.len() > max_items {
-        format!(
-            "{}, … +{} more",
-            shown.join(", "),
-            bindings.len() - max_items
-        )
-    } else {
-        shown.join(", ")
-    }
-}
 
-fn binding_kind_label(kind: BindingKind) -> &'static str {
-    match kind {
-        BindingKind::Let => "let",
-        BindingKind::Touch => "touch",
-        BindingKind::Def => "def",
-    }
-}
 
 pub fn workspace_error_report(err: &SurfaceError) -> WorkspaceReport {
     WorkspaceReport {
@@ -365,66 +343,9 @@ pub fn workspace_error_report(err: &SurfaceError) -> WorkspaceReport {
     }
 }
 
-fn lsp_changes_to_content_changes(
-    base_text: &str,
-    events: &[TextDocumentContentChangeEvent],
-) -> (Vec<ContentChange>, String) {
-    let mut current_text = base_text.to_string();
-    let mut content_changes = Vec::with_capacity(events.len());
-    for change in events {
-        if let Some(range) = change.range {
-            let start = position_to_offset(&current_text, range.start).min(current_text.len());
-            let end = position_to_offset(&current_text, range.end).min(current_text.len());
-            let start = start.min(end);
-            let end = start.max(end);
-            content_changes.push(ContentChange {
-                range: Some((start, end)),
-                text: change.text.clone(),
-            });
-            current_text.replace_range(start..end, &change.text);
-        } else {
-            content_changes.push(ContentChange {
-                range: None,
-                text: change.text.clone(),
-            });
-            current_text = change.text.clone();
-        }
-    }
-    (content_changes, current_text)
-}
 
-fn extract_trace_steps(term: &str) -> Option<Vec<String>> {
-    if let Some(steps_start) = term.find("(steps ") {
-        let steps_content = &term[steps_start + "(steps ".len()..];
-        if let Some(steps_end) = steps_content.find(")))") {
-            let steps_str = &steps_content[..steps_end];
-            let steps: Vec<String> = steps_str
-                .split_whitespace()
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
-            if !steps.is_empty() {
-                return Some(steps);
-            }
-        }
-    }
 
-    if term.starts_with("(quote (") && term.ends_with("))") {
-        let content_start = "(quote (".len();
-        let content_end = term.len() - "))".len();
-        let content = &term[content_start..content_end];
-        let steps: Vec<String> = content
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if !steps.is_empty() {
-            return Some(steps);
-        }
-    }
 
-    None
-}
 
 pub struct Backend {
     client: Client, // Changed to Client
@@ -433,6 +354,7 @@ pub struct Backend {
     did_change_tx: mpsc::Sender<DebouncedDocumentChange>,
     registry: Arc<PrinterRegistry>, // NEW: server-wide printer registry
     tactic_registry: Arc<TacticRegistry>, // NEW: tactic engine
+    db: Arc<SniperDatabase>, // SniperDB instance
 }
 
 impl Backend {
@@ -448,10 +370,15 @@ impl Backend {
         register_std_tactics(&mut tactic_registry);
         let tactic_registry = Arc::new(tactic_registry);
 
+        // Initialize SniperDB
+        let db = Arc::new(SniperDatabase::new());
+
         tokio::spawn(process_debounced_proof_session_events(
             proof_session_arc.clone(),
             config.clone(), // Pass config directly
+            config.clone(), // Pass config directly
             client.clone(),
+            db.clone(),
             did_change_rx,
         ));
         Self {
@@ -461,6 +388,7 @@ impl Backend {
             did_change_tx,
             registry,
             tactic_registry,
+            db,
         }
     }
 } // End of impl Backend
@@ -469,7 +397,9 @@ impl Backend {
 async fn process_debounced_proof_session_events(
     proof_session_arc: Arc<RwLock<ProofSession>>,
     config_arc: Arc<RwLock<Config>>,
+    config_arc: Arc<RwLock<Config>>,
     client: Client, // Changed to Client
+    db: Arc<SniperDatabase>,
     mut receiver: mpsc::Receiver<DebouncedDocumentChange>,
 ) {
     let mut last_change_time: Option<Instant> = None;
@@ -509,8 +439,22 @@ async fn process_debounced_proof_session_events(
                         goals: _,
                     } = {
                         let mut proof_session = proof_session_arc.write().await;
-                        proof_session.update(change.uri.clone(), change.version, change.content_changes).await
+                        proof_session.update(change.uri.clone(), change.version, change.content_changes.clone()).await
                     };
+
+                    // Update SniperDB input
+                    // We need to resolve the full text from ProofSession (or cache it locally).
+                    // Since ProofSession updates its own parsed document, we can read it back.
+                    {
+                        let session = proof_session_arc.read().await;
+                        if let Some(doc) = session.get_parsed_document(&change.uri) {
+                             // TODO: Map URI to FileId. For Stage A, we hash the URI string to get u32?
+                             // Or we add a map to SniperDatabase. 
+                             // Let's use a simple hash for now to unblock.
+                             let file_id = crc32fast::hash(change.uri.as_str().as_bytes());
+                             db.set_input(file_id, doc.text.clone());
+                        }
+                    }
                     
                     client
                         .publish_diagnostics(
@@ -590,6 +534,21 @@ impl LanguageServer for Backend {
                         work_done_progress: None,
                     },
                 }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions {
+                                work_done_progress: None,
+                            },
+                            legend: SemanticTokensLegend {
+                                token_types: crate::highlight::LEGEND_TOKEN_TYPES.to_vec(),
+                                token_modifiers: crate::highlight::LEGEND_TOKEN_MODIFIERS.to_vec(),
+                            },
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        }
+                    )
+                ),
                 ..ServerCapabilities::default()
             },
         })
@@ -613,7 +572,12 @@ impl LanguageServer for Backend {
             report: _,
             diagnostics,
             goals: _,
-        } = self.proof_session.write().await.open(uri.clone(), version, text).await;
+        } = self.proof_session.write().await.open(uri.clone(), version, text.clone()).await;
+        
+        // Update SniperDB
+        let file_id = crc32fast::hash(uri.as_str().as_bytes());
+        self.db.set_input(file_id, text);
+
         self.client
             .publish_diagnostics(
                 uri,
@@ -988,6 +952,31 @@ impl LanguageServer for Backend {
             }
         };
         Ok(hints_result)
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let tokens = {
+            let session = self.proof_session.read().await;
+            if let Some(doc) = session.get_document(&uri) {
+                let text = &doc.parsed.text;
+                // Compute tokens using highlight module (Layer 0 + 1)
+                let mut raw_tokens = crate::highlight::compute_layer0_structural(text);
+                
+                // Convert to LSP format
+                let data = crate::highlight::tokens_to_lsp_data(text, &mut raw_tokens);
+                Some(SemanticTokens {
+                    result_id: None,
+                    data,
+                })
+            } else {
+                None
+            }
+        };
+        Ok(tokens.map(SemanticTokensResult::Tokens))
     }
 
     async fn document_symbol(

@@ -78,13 +78,16 @@ impl LoogleIndex {
         let query_parser = QueryParser::for_index(&self.index, vec![lhs_field, rhs_field]);
         let query = query_parser.parse_query(query_fp)?;
         
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+        // Fetch more than limit to allow for stable post-sorting
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit * 2))?;
         
-        let mut results = Vec::new();
-        for (_score, doc_address) in top_docs {
+        let name_field = self.schema.get_field("name").unwrap();
+        let doc_field = self.schema.get_field("doc").unwrap();
+        
+        // Collect results with scores for stable sorting
+        let mut scored_results = Vec::new();
+        for (score, doc_address) in top_docs {
             let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
-            let name_field = self.schema.get_field("name").unwrap();
-            let doc_field = self.schema.get_field("doc").unwrap();
             
             if let Some(name) = retrieved_doc.get_first(name_field).and_then(|v| v.as_str()) {
                 let doc_text = retrieved_doc
@@ -92,15 +95,33 @@ impl LoogleIndex {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 
-                results.push(LoogleResult {
-                    name: name.to_string(),
-                    rationale: format!("Structural match: {}", query_fp),
-                    doc: doc_text.to_string(),
-                });
+                scored_results.push((
+                    score,
+                    LoogleResult {
+                        name: name.to_string(),
+                        rationale: format!("Structural match: {}", query_fp),
+                        doc: doc_text.to_string(),
+                    }
+                ));
             }
         }
         
-        Ok(results)
+        // Stable post-sorting: primary by score DESC, tie-break by name ASC
+        // Quantize scores to avoid float representation drift
+        scored_results.sort_by(|a, b| {
+            let score_a = (a.0 * 100.0).round() as i32;
+            let score_b = (b.0 * 100.0).round() as i32;
+            
+            score_b.cmp(&score_a)  // DESC
+                .then_with(|| a.1.name.cmp(&b.1.name))  // ASC tie-break
+        });
+        
+        // Take only the requested limit and drop scores
+        Ok(scored_results
+            .into_iter()
+            .take(limit)
+            .map(|(_, result)| result)
+            .collect())
     }
 
     /// Clear all indexed lemmas (for re-indexing)
@@ -122,8 +143,12 @@ pub struct LoogleResult {
 pub mod indexer;
 pub mod applicability;
 pub mod code_actions;
+pub mod context;
 
 pub use indexer::WorkspaceIndexer;
+pub use indexer::{compute_fingerprint, LOOGLE_FP_VERSION};
 pub use applicability::{ApplicabilityResult, LemmaPayload, check_applicability, to_proposal};
 pub use code_actions::generate_loogle_actions;
+pub use context::GoalContext;
+
 

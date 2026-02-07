@@ -9,5 +9,7 @@ pub mod tactics;
 pub mod diff;
 pub mod proposal;
 pub mod loogle;
+pub mod refute;
+pub mod highlight;
 
 pub use lsp::Backend;

@@ -60,6 +60,111 @@ mod tests {
         
         assert_eq!(proposal.payload.name, "test_lemma");
         assert_eq!(proposal.score, 0.9);
+        // ID should be deterministic hash, not UUID
         assert!(proposal.id.starts_with("loogle_"));
+        assert!(!proposal.id.contains("-")); // UUIDs have dashes
+        assert_eq!(proposal.id.len(), "loogle_".len() + 32); // 16 bytes hex-encoded
+    }
+    
+    #[test]
+    fn test_proposal_id_determinism() {
+        use edgelord_lsp::loogle::{LoogleResult, ApplicabilityResult, to_proposal};
+        
+        let lemma = LoogleResult {
+            name: "deterministic_test".to_string(),
+            rationale: "Test".to_string(),
+            doc: "Testing determinism".to_string(),
+        };
+        
+        let applicability = ApplicabilityResult {
+            applicable: true,
+            confidence: 0.75,
+            unification_preview: None,
+            pedagogical_rationale: "Test rationale".to_string(),
+        };
+        
+        // Generate two proposals with identical inputs
+        let proposal1 = to_proposal(lemma.clone(), applicability.clone(), "anchor_123".to_string());
+        let proposal2 = to_proposal(lemma, applicability, "anchor_123".to_string());
+        
+        // IDs should be identical (content-addressed)
+        assert_eq!(proposal1.id, proposal2.id);
+        
+        // Verify it's a hex string of the right format
+        assert!(proposal1.id.starts_with("loogle_"));
+        let hash_part = &proposal1.id["loogle_".len()..];
+        assert_eq!(hash_part.len(), 32); // 16 bytes as hex
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    
+    #[test]
+    fn test_fingerprint_determinism() {
+        use edgelord_lsp::loogle::{compute_fingerprint, LOOGLE_FP_VERSION};
+        use tcb_core::ast::MorphismTerm;
+        use tcb_core::id_minting::GeneratorId;
+        
+        // Create a test term using Default
+        let term = MorphismTerm::Generator {
+            id: GeneratorId::default(),
+            inputs: vec![],
+            outputs: vec![],
+        };
+        
+        // Compute fingerprint twice - must be byte-for-byte identical
+        let fp1 = compute_fingerprint(&term);
+        let fp2 = compute_fingerprint(&term);
+        
+        assert_eq!(fp1, fp2, "Fingerprint must be deterministic");
+        
+        // Should have version prefix
+        assert!(fp1.starts_with(&format!("v{}:", LOOGLE_FP_VERSION)));
+    }
+    
+    #[test]
+    fn test_fingerprint_version_tag() {
+        use edgelord_lsp::loogle::{compute_fingerprint, LOOGLE_FP_VERSION};
+        use tcb_core::ast::MorphismTerm;
+        
+        // Create a Hole term - HoleId is just u32
+        let term = MorphismTerm::Hole(7);
+        let fp = compute_fingerprint(&term);
+        
+        // Verify version tag format v{N}:{fingerprint}
+        assert!(fp.starts_with("v"), "Fingerprint must start with v");
+        let parts: Vec<&str> = fp.splitn(2, ':').collect();
+        assert_eq!(parts.len(), 2, "Fingerprint must have version:payload format");
+        
+        let version_str = &parts[0][1..]; // Strip 'v'
+        let version: u32 = version_str.parse().expect("Version must be numeric");
+        assert_eq!(version, LOOGLE_FP_VERSION);
+    }
+    
+    #[test]
+    fn test_fingerprint_no_debug_format() {
+        use edgelord_lsp::loogle::compute_fingerprint;
+        use tcb_core::ast::MorphismTerm;
+        use tcb_core::doctrine::DoctrineKey;
+        use tcb_core::id_minting::GeneratorId;
+        
+        // Create a term with InDoctrine wrapper - this previously used {:?}
+        let inner = MorphismTerm::Generator {
+            id: GeneratorId::default(),
+            inputs: vec![],
+            outputs: vec![],
+        };
+        let term = MorphismTerm::InDoctrine {
+            doctrine: DoctrineKey::placeholder(), // Key 0
+            term: Box::new(inner),
+        };
+        
+        let fp = compute_fingerprint(&term);
+        
+        // Should NOT contain Debug-style output like "DoctrineKey(0)"
+        assert!(!fp.contains("DoctrineKey"), 
+            "Fingerprint must not contain Debug output: {}", fp);
+        
+        // Should contain stable numeric format like "doc:0:"
+        assert!(fp.contains("doc:0:"), 
+            "Fingerprint should use stable as_u32() format: {}", fp);
     }
 }
