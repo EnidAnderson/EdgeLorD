@@ -1,12 +1,13 @@
 use std::{cmp::Ordering, collections::BTreeSet};
+use serde::{Deserialize, Serialize};
 
-use new_surface_syntax::{
+use comrade_lisp::{
     ParseError, parser,
     syntax::{Atom, SExpr, SExprKind},
 };
 use tower_lsp::lsp_types::TextDocumentContentChangeEvent;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ByteSpan {
     pub start: usize,
     pub end: usize,

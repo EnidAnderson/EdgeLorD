@@ -1,9 +1,10 @@
 use crate::explain::builder::ExplainBuilder;
 use crate::explain::view::{ExplanationView, ExplanationKind, ExplainLimits};
-use new_surface_syntax::proof_state::{ProofState, GoalStatus, MorMetaId};
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::proof_state::{ProofState, GoalStatus, MorMetaId};
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
 use std::collections::{BTreeSet, HashMap};
 use source_span::Span;
+use comrade_lisp::proof_state;
 
 /// Explain why a goal is blocked: show linear blocker chains for highest impact metas.
 pub fn explain_why_blocked(
@@ -123,7 +124,7 @@ fn compute_meta_impact(ps: &ProofState) -> HashMap<MorMetaId, usize> {
     map
 }
 
-fn find_goal_for_meta(ps: &ProofState, meta_id: MorMetaId) -> Option<&new_surface_syntax::proof_state::GoalState> {
+fn find_goal_for_meta(ps: &ProofState, meta_id: MorMetaId) -> Option<&proof_state::GoalState> {
     ps.goals.iter().find(|g| g.id == meta_id)
 }
 

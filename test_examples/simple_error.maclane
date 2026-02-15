@@ -1,0 +1,23 @@
+;; Simple test file with intentional errors for LSP testing
+
+(begin
+  ;; Touch symbols before defining them (MacLane requirement)
+  (touch my-symbol)
+  (touch my-value)
+  (touch another-def)
+  
+  ;; This should work - define a simple value using apostrophe quote
+  (def my-value 'hello)
+  
+  ;; ERROR: Reference to undefined symbol
+  (def broken-ref undefined-symbol)
+  
+  ;; ERROR: Invalid arity for touch (expects 1 argument)
+  (touch x y)
+  
+  ;; This should work - define with the symbol we touched
+  (def another-def my-symbol)
+  
+  ;; ERROR: Trying to def without touching first
+  (def untouched-symbol 'oops)
+)

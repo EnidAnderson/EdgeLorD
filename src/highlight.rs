@@ -2,8 +2,8 @@
 
 use tower_lsp::lsp_types::{SemanticToken, SemanticTokenType, SemanticTokenModifier};
 use crate::document::ByteSpan;
-use new_surface_syntax::parser;
-use new_surface_syntax::syntax::{SExpr, SExprKind, Atom};
+use comrade_lisp::parser;
+use comrade_lisp::syntax::{SExpr, SExprKind, Atom};
 
 pub struct HighlightCtx<'a> {
     pub text: &'a str,

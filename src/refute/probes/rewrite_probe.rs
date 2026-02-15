@@ -124,7 +124,7 @@ mod tests {
 
     fn test_slice_with_obligations(obligations: Vec<Obligation>) -> RefuteSlice {
         RefuteSlice {
-            anchor: StableAnchor::test(AnchorKind::Goal, "file:///test.ml", 0),
+            anchor: StableAnchor::test(AnchorKind::Goal, "file:///test.ml", vec![], 0, 0),
             obligations,
             coherence_obligations: vec![],
             rules: BoundedList::empty(),

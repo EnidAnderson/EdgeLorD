@@ -2,7 +2,7 @@
 use crate::loogle::{check_applicability, to_proposal, LoogleResult};
 use tower_lsp::lsp_types::{CodeAction, CodeActionKind, WorkspaceEdit, TextEdit, Range};
 use std::collections::HashMap;
-use new_surface_syntax::proof_state::ProofState;
+use comrade_lisp::proof_state::ProofState;
 
 /// Generate Loogle-based code actions for the current cursor position
 pub fn generate_loogle_actions(

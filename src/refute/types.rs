@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is a local copy to avoid deep dependency paths.
 /// Matches the structure in `new_surface_syntax::diagnostics::anchors`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
 #[serde(rename_all = "camelCase")]
 pub struct StableAnchor {
     pub kind: AnchorKind,
@@ -23,13 +23,14 @@ pub struct StableAnchor {
     pub span_fingerprint: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
 #[serde(rename_all = "camelCase")]
 pub enum AnchorKind { 
     Goal, 
     Constraint, 
     Binding, 
     AstNode,
+    Hole,
 }
 
 impl StableAnchor {
@@ -44,14 +45,13 @@ impl StableAnchor {
     }
     
     /// Create a test anchor.
-    #[cfg(test)]
-    pub fn test(kind: AnchorKind, file: &str, ordinal: u32) -> Self {
+    pub fn test(kind: AnchorKind, file_uri: &str, owner_path: Vec<String>, ordinal: u32, span_fingerprint: u64) -> Self {
         Self {
             kind,
-            file_uri: file.to_string(),
-            owner_path: vec![],
+            file_uri: file_uri.to_string(),
+            owner_path,
             ordinal,
-            span_fingerprint: 0,
+            span_fingerprint,
         }
     }
 }
@@ -66,7 +66,7 @@ impl StableAnchor {
 /// EdgeLorD (refute, explain, loogle). Always includes:
 /// - `total_count`: how many items existed before capping
 /// - `truncation_reason`: why we stopped (if truncated)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct BoundedList<T> {
     pub items: Vec<T>,
@@ -115,7 +115,7 @@ impl<T> Default for BoundedList<T> {
 }
 
 /// Reason for truncation in bounded operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TruncationReason {
     Timeout,

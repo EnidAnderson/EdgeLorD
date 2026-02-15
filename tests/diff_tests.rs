@@ -1,16 +1,17 @@
 use edgelord_lsp::diff::engine::compute_diff;
 use edgelord_lsp::goals_panel::GoalChangeKind;
-use new_surface_syntax::proof_state::{
+use comrade_lisp::proof_state::{
     ProofState, GoalState, GoalStatus, LocalContext, ObjExpr, ElaborationTrace, MorMetaId, 
     MorType, HoleOwner, MetaSubst
 };
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
-use new_surface_syntax::diagnostics::DiagnosticContext;
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::diagnostics::DiagnosticContext;
 use source_span::Span;
+use comrade_lisp::proof_state;
 
 #[test]
 fn test_status_change_diff() {
-    let obj0 = ObjExpr::Meta(new_surface_syntax::proof_state::ObjMetaId(0));
+    let obj0 = ObjExpr::Meta(proof_state::ObjMetaId(0));
     let mor_type = MorType { src: obj0.clone(), dst: obj0 };
     let owner = HoleOwner::TopLevel { form_index: 0 };
     let empty_lc = LocalContext { entries: vec![], doctrine: None };
@@ -51,7 +52,7 @@ fn test_status_change_diff() {
                 span: Some(Span::new(0, 5)),
                 local_context: empty_lc.clone(),
                 expected_type: mor_type,
-                status: GoalStatus::Solved(new_surface_syntax::proof_state::MorExpr::Meta(MorMetaId(99))),
+                status: GoalStatus::Solved(proof_state::MorExpr::Meta(MorMetaId(99))),
                 relevant_constraints: vec![],
             },
         ],
@@ -79,7 +80,7 @@ fn test_status_change_diff() {
 
 #[test]
 fn test_blockers_change_diff() {
-    let obj0 = ObjExpr::Meta(new_surface_syntax::proof_state::ObjMetaId(0));
+    let obj0 = ObjExpr::Meta(proof_state::ObjMetaId(0));
     let mor_type = MorType { src: obj0.clone(), dst: obj0 };
     let owner_m1 = HoleOwner::TopLevel { form_index: 0 };
     let owner_m2 = HoleOwner::Def("foo".to_string());

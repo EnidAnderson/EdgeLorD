@@ -1,0 +1,38 @@
+;; Code Actions Demo - Showcasing SniperDB Semantic Awareness
+;; This file demonstrates the "Preview Rename Impact" feature
+
+(begin
+  ;; Define some interconnected symbols
+  (touch base-type)
+  (touch derived-type)
+  (touch helper-fn)
+  (touch main-fn)
+  (touch another-use)
+  
+  ;; base-type is used in multiple places
+  (def base-type 'TypeConstructor)
+  
+  ;; derived-type depends on base-type
+  (def derived-type base-type)
+  
+  ;; helper-fn uses base-type
+  (def helper-fn base-type)
+  
+  ;; main-fn uses both helper-fn and base-type
+  (def main-fn helper-fn)
+  
+  ;; Another reference to base-type
+  (def another-use base-type)
+)
+
+;; TRY THIS:
+;; 1. Place cursor on "base-type" (line 11)
+;; 2. Trigger code actions (Helix: Space + a)
+;; 3. Select "Preview Rename Impact: base-type → base-type_renamed"
+;; 4. See SniperDB analyze all dependencies and show impact!
+;;
+;; SniperDB will show:
+;; - Which definitions reference base-type
+;; - Scope-aware analysis
+;; - Cost estimation for the rename
+;; - Proof preservation status

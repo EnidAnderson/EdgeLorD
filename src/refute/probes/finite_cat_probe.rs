@@ -127,7 +127,7 @@ mod tests {
         
         let probe = FiniteCatProbe::new();
         let slice = RefuteSlice {
-            anchor: StableAnchor::test(AnchorKind::Goal, "file:///test.ml", 0),
+            anchor: StableAnchor::test(AnchorKind::Goal, "file:///test.ml", vec![], 0, 0),
             obligations: vec![],
             coherence_obligations: vec![],
             rules: BoundedList::empty(),

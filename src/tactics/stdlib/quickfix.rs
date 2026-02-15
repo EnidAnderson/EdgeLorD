@@ -1,6 +1,6 @@
 use crate::tactics::view::{Tactic, TacticRequest, TacticResult, TacticAction, ActionKind, ActionSafety};
 use crate::tactics::edit::EditBuilder;
-use new_surface_syntax::diagnostics::anchors::{StableAnchor, AnchorKind};
+use comrade_lisp::diagnostics::anchors::{StableAnchor, AnchorKind};
 use std::collections::BTreeMap;
 
 pub struct AddTouchTactic;

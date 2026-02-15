@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use new_surface_syntax::proof_state::{ProofState, MorMetaId, GoalStatus as KernelGoalStatus};
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::proof_state::{ProofState, MorMetaId, GoalStatus as KernelGoalStatus};
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
 use crate::goals_panel::{GoalDelta, GoalChangeKind, GoalStatus};
 
 /// Computes the semantic difference between two proof states.

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tower_lsp::lsp_types::{Range, WorkspaceEdit};
-use new_surface_syntax::proof_state::ProofState;
+use comrade_lisp::proof_state::ProofState;
 use crate::document::ParsedDocument;
 use crate::edgelord_pretty_ctx::EdgeLordPrettyCtx;
-use new_surface_syntax::diagnostics::anchors::StableAnchor;
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::diagnostics::anchors::StableAnchor;
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
 
 /// Selection details from the editor.
 #[derive(Debug, Clone, Serialize, Deserialize)]

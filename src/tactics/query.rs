@@ -1,7 +1,7 @@
 use crate::tactics::view::Selection;
 use crate::document::ParsedDocument;
 use crate::document::ByteSpan;
-use new_surface_syntax::proof_state::{ProofState, MorMetaId, GoalStatus};
+use comrade_lisp::proof_state::{ProofState, MorMetaId, GoalStatus};
 use std::collections::BTreeSet;
 
 /// High-level query interface for tactics.

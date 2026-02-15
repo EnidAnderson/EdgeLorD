@@ -1,7 +1,7 @@
 use crate::explain::builder::ExplainBuilder;
 use crate::explain::view::{ExplanationView, ExplanationKind, ExplainLimits};
-use new_surface_syntax::proof_state::{ProofState, GoalStatus};
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::proof_state::{ProofState, GoalStatus};
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
 
 /// Explain why a goal is inconsistent: show deterministic conflict sets and their origins.
 pub fn explain_why_inconsistent(

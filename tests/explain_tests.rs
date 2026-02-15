@@ -3,12 +3,13 @@ use edgelord_lsp::explain::view::{ExplanationKind, ExplainLimits, validate_span}
 use edgelord_lsp::explain::alg_goal::explain_goal;
 use edgelord_lsp::explain::alg_blocked::explain_why_blocked;
 use edgelord_lsp::explain::alg_inconsistent::explain_why_inconsistent;
-use new_surface_syntax::proof_state::{
+use comrade_lisp::proof_state;
+use comrade_lisp::proof_state::{
     ProofState, GoalState, GoalStatus, LocalContext, ObjExpr, ElaborationTrace, MorMetaId, 
     MorType, HoleOwner, MetaSubst
 };
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
-use new_surface_syntax::diagnostics::DiagnosticContext;
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::diagnostics::DiagnosticContext;
 use source_span::Span;
 
 #[test]
@@ -49,7 +50,7 @@ fn test_jump_target_validity() {
 
 #[test]
 fn test_explain_why_blocked_snapshot() {
-    let obj0 = ObjExpr::Meta(new_surface_syntax::proof_state::ObjMetaId(0));
+    let obj0 = ObjExpr::Meta(proof_state::ObjMetaId(0));
     let mor_type = MorType { src: obj0.clone(), dst: obj0 };
     let owner = HoleOwner::TopLevel { form_index: 0 };
     let empty_lc = LocalContext { entries: vec![], doctrine: None };
@@ -121,7 +122,7 @@ fn test_explain_why_blocked_snapshot() {
 
 #[test]
 fn test_explain_goal_snapshot() {
-    let obj0 = ObjExpr::Meta(new_surface_syntax::proof_state::ObjMetaId(0));
+    let obj0 = ObjExpr::Meta(proof_state::ObjMetaId(0));
     let mor_type = MorType { src: obj0.clone(), dst: obj0 };
     let owner = HoleOwner::TopLevel { form_index: 0 };
     let empty_lc = LocalContext { entries: vec![], doctrine: None };
@@ -160,7 +161,7 @@ fn test_explain_goal_snapshot() {
 
 #[test]
 fn test_explain_why_inconsistent_snapshot() {
-    let obj0 = ObjExpr::Meta(new_surface_syntax::proof_state::ObjMetaId(0));
+    let obj0 = ObjExpr::Meta(proof_state::ObjMetaId(0));
     let mor_type = MorType { src: obj0.clone(), dst: obj0 };
     let owner = HoleOwner::TopLevel { form_index: 0 };
     let empty_lc = LocalContext { entries: vec![], doctrine: None };
@@ -183,7 +184,7 @@ fn test_explain_why_inconsistent_snapshot() {
         constraints: vec![],
         subst: MetaSubst::new(),
         trace: ElaborationTrace::new(),
-        conflicts: vec![new_surface_syntax::proof_state::ConstraintId(0)],
+        conflicts: vec![proof_state::ConstraintId(0)],
         solver_error: None,
         cycles: vec![],
     };

@@ -1,20 +1,23 @@
-# Project-local Helix language + LSP wiring for Comrade files.
+# EdgeLorD / MacLane Language Support for Helix
+# Copy this to ~/.config/helix/languages.toml or include it in your config
+
+[[language]]
+name = "maclane"
+scope = "source.maclane"
+injection-regex = "maclane"
+file-types = ["maclane", "ml", "edgelord"]
+comment-token = ";"
+indent = { tab-width = 2, unit = "  " }
+roots = []
+language-servers = ["edgelord-lsp"]
 
 [language-server.edgelord-lsp]
-command = "cargo"
-args = ["run", "--quiet", "--bin", "edgelord-lsp"]
+command = "/Users/e/Documents/MotivicCohomology/GitLocal/EdgeLorD/target/debug/edgelord-lsp"
+args = []
 
-[[language]]
-name = "comrade"
-scope = "source.lisp"
-grammar = "scheme"
-file-types = ["comrade", "maclane"]
-roots = ["Cargo.toml", ".git"]
-auto-format = false
-language-servers = ["edgelord-lsp"]
-
-# Fallback: if Helix resolves a .comrade buffer as Scheme, still attach the server.
-[[language]]
-name = "scheme"
-file-types = ["scm", "ss", "comrade", "maclane"]
-language-servers = ["edgelord-lsp"]
+# Configuration options (optional)
+[language-server.edgelord-lsp.config]
+debounceIntervalMs = 250
+logLevel = "info"
+enableDb7HoverPreview = true
+cachesEnabled = true

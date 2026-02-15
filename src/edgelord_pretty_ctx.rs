@@ -1,6 +1,6 @@
-use new_surface_syntax::diagnostics::pretty::{PrettyCtx, PrettyPrinter, PrettyDialect, PrettyLimits, PrinterRegistry, PrinterKey};
-use new_surface_syntax::diagnostics::DiagnosticContext;
-use new_surface_syntax::proof_state::ProofState;
+use comrade_lisp::diagnostics::pretty::{PrettyCtx, PrettyPrinter, PrettyDialect, PrettyLimits, PrinterRegistry, PrinterKey};
+use comrade_lisp::diagnostics::DiagnosticContext;
+use comrade_lisp::proof_state::ProofState;
 use tower_lsp::lsp_types::Url;
 
 /// Ephemeral pretty-printing context for LSP requests.

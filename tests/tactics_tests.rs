@@ -5,7 +5,7 @@ use edgelord_lsp::tactics::{
 };
 use edgelord_lsp::edgelord_pretty_ctx::EdgeLordPrettyCtx;
 use edgelord_lsp::document::ParsedDocument;
-use new_surface_syntax::proof_state::{ProofState, MetaSubst, ElaborationTrace};
+use comrade_lisp::proof_state::{ProofState, MetaSubst, ElaborationTrace};
 use tower_lsp::lsp_types::{Range, Position, Url};
 use std::sync::Arc;
 

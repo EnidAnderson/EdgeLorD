@@ -1,0 +1,13 @@
+; Test file with multiple independent errors
+; This file should show ALL errors simultaneously once multi-diagnostics is implemented
+
+(begin
+  ; Error 1: Unknown identifier (not touched)
+  (def unknown_var x)
+  
+  ; Error 2: Another unknown identifier
+  (def another_unknown y)
+  
+  ; Error 3: Yet another unknown identifier
+  (def third_unknown z)
+)

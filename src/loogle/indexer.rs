@@ -1,5 +1,5 @@
 use super::LoogleIndex;
-use new_surface_syntax::core::{CoreBundleV0, CompiledRule};
+use comrade_lisp::core::{CoreBundleV0, CompiledRule};
 
 /// Fingerprint format version - increment when changing fingerprint structure
 /// to invalidate stale indexes and prevent version drift.
@@ -188,8 +188,7 @@ fn compute_fingerprint_bounded(
         MorphismTerm::Reject { code, .. } => {
             // Rejected terms - include error code (user-provided string, stable)
             format!("!{}", code)
-        }
-    };
+        }    };
     
     ctx.exit();
     result

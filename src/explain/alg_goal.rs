@@ -1,7 +1,8 @@
 use crate::explain::builder::ExplainBuilder;
 use crate::explain::view::{ExplanationView, ExplanationKind, ExplainLimits};
-use new_surface_syntax::proof_state::{ProofState, GoalStatus};
-use new_surface_syntax::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::proof_state::{ProofState, GoalStatus};
+use comrade_lisp::diagnostics::projection::GoalsPanelIndex;
+use comrade_lisp::proof_state;
 
 /// Explain what a goal is: its context, target, and direct evidence.
 pub fn explain_goal(
@@ -64,6 +65,6 @@ pub fn explain_goal(
     builder.build()
 }
 
-fn find_span_for_meta(ps: &ProofState, meta_id: new_surface_syntax::proof_state::MorMetaId) -> Option<source_span::Span> {
+fn find_span_for_meta(ps: &ProofState, meta_id: proof_state::MorMetaId) -> Option<source_span::Span> {
     ps.goals.iter().find(|g| g.id == meta_id).and_then(|g| g.span)
 }

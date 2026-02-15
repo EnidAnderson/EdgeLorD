@@ -11,5 +11,8 @@ pub mod proposal;
 pub mod loogle;
 pub mod refute;
 pub mod highlight;
+pub mod caching; // Phase 1.1: Deterministic Snapshot Reuse
+pub mod queries; // Phase 1.2B: DB-Native Named Queries
+pub mod db_memo; // Phase 1.2B: DB-Native Memoization Wrapper
 
 pub use lsp::Backend;

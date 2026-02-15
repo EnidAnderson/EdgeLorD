@@ -190,7 +190,7 @@ mod tests {
     use super::*;
 
     fn test_anchor() -> StableAnchor {
-        StableAnchor::test(AnchorKind::Goal, "file:///test.ml", 0)
+        StableAnchor::test(AnchorKind::Goal, "file:///test.ml", vec![], 0, 0)
     }
 
     #[test]
