@@ -49,6 +49,7 @@ use crate::tactics::{
     view::ActionSafety, view::Selection, view::TacticLimits, registry::TacticRegistry, view::TacticRequest,
     stdlib::register_std_tactics,
 };
+use crate::hint_engine::HintEngine;
 use crate::proof_session::{ProofSession, ProofSessionOpenResult, ProofSessionUpdateResult};
 use crate::refute::lsp_handler::{RefuteRequest, handle_refute_request};
 // Removed ClientSink imports
@@ -92,6 +93,18 @@ fn stable_uri_file_id(uri: &Url) -> u32 {
 // Helper function to check if a character is valid in a Mac Lane identifier
 fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '+' | '-' | '*' | '/' | '?' | '!' | '=' | '<' | '>' | ':' | '.')
+}
+
+/// Extract the tactic family prefix from a full action_id.
+///
+/// Convention: `action_id = "<tactic_prefix>:<per-site-suffix>"`.
+/// Examples: `"std.rewrite:anchor_abc"` → `"std.rewrite"`.
+/// If no colon, the entire ID is returned (stable for novel tactics).
+fn hint_engine_tactic_prefix(action_id: &str) -> String {
+    action_id
+        .split_once(':')
+        .map(|(prefix, _)| prefix.to_string())
+        .unwrap_or_else(|| action_id.to_string())
 }
 
 // Extract symbol at LSP position (fail-closed)
@@ -855,6 +868,10 @@ pub struct Backend {
     tactic_registry: Arc<TacticRegistry>, // Tactic engine
     db: Arc<SniperDatabase>, // SniperDB instance
     madlib_resolver: Arc<RwLock<Option<MadLibResolver>>>, // Phase 1.5: MadLib resolver with auto-discovery
+    /// Phase A ML: Learned tactic ranker (untrusted advisory layer).
+    /// INV T-HINT: HintEngine never crosses Stonewall; output is suggestions only.
+    /// Wrapped in RwLock so workspace root can be injected in initialize().
+    hint_engine: Arc<RwLock<Arc<HintEngine>>>,
 }
 
 impl Backend {
@@ -890,6 +907,8 @@ impl Backend {
             tactic_registry,
             db,
             madlib_resolver: Arc::new(RwLock::new(None)), // Phase 1.5: Initialized in initialize() after workspace root discovery
+            // Phase A ML: HintEngine starts without workspace root; root injected in initialize().
+            hint_engine: Arc::new(RwLock::new(HintEngine::new(None))),
         }
     }
 
@@ -1554,6 +1573,21 @@ impl LanguageServer for Backend {
 
             *self.madlib_resolver.write().await = resolver;
         }
+
+        // Phase A ML: Hot-swap HintEngine now that workspace root is known.
+        {
+            let new_engine = if let Some(root_uri) = params.root_uri.as_ref() {
+                if let Ok(root_path) = root_uri.to_file_path() {
+                    HintEngine::new(Some(&root_path))
+                } else {
+                    HintEngine::new(None)
+                }
+            } else {
+                HintEngine::new(None)
+            };
+            *self.hint_engine.write().await = new_engine;
+        }
+
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "edgelord-lsp".to_string(),
@@ -2208,12 +2242,48 @@ impl LanguageServer for Backend {
             index: doc.goals_index.as_ref(),
             selection: Selection { range },
             limits: TacticLimits::default(),
+            rule_index: None,
         };
 
         let actions = self.tactic_registry.compute_all(&req);
 
-        let mut response: Vec<CodeActionOrCommand> = actions
+        // Phase A ML: Score tactic actions via HintEngine (untrusted advisory layer).
+        // INV T-HINT: scores are purely cosmetic re-ordering; Stonewall still verifies every edit.
+        // INV D-HINT: sort is deterministic — score DESC, safety ASC, title ASC tie-break.
+        let proof_bytes = format!("{:?}", proof_state).into_bytes();
+        let tactic_id_prefixes: Vec<String> = actions
+            .iter()
+            .map(|a| hint_engine_tactic_prefix(&a.action_id))
+            .collect();
+        let hint_engine_ref = self.hint_engine.read().await;
+        let hint_scores = hint_engine_ref.query(&proof_bytes, &tactic_id_prefixes);
+        hint_engine_ref.record_proposed(&proof_bytes, &tactic_id_prefixes);
+        drop(hint_engine_ref);
+        let hint_score_map: BTreeMap<String, f32> = hint_scores
+            .iter()
+            .map(|h| (h.tactic_id.clone(), h.score))
+            .collect();
+
+        // Re-sort: hint score DESC, then original (safety, kind, title) order.
+        let mut scored: Vec<(f32, _)> = actions
             .into_iter()
+            .map(|a| {
+                let score = hint_score_map
+                    .get(&hint_engine_tactic_prefix(&a.action_id))
+                    .copied()
+                    .unwrap_or(0.5_f32);
+                (score, a)
+            })
+            .collect();
+        scored.sort_by(|(sa, a), (sb, b)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then((a.safety as u8).cmp(&(b.safety as u8)))
+                .then(a.title.cmp(&b.title))
+        });
+        let sorted_actions = scored.into_iter().map(|(_, a)| a);
+
+        let mut response: Vec<CodeActionOrCommand> = sorted_actions
             .map(|a| {
                 CodeActionOrCommand::CodeAction(tower_lsp::lsp_types::CodeAction {
                     title: a.title,

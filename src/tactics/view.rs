@@ -35,6 +35,8 @@ pub struct TacticRequest<'a> {
     pub index: Option<&'a GoalsPanelIndex>,
     pub selection: Selection,
     pub limits: TacticLimits,
+    /// SC0: Optional rule index for doctrine-aware rule queries.
+    pub rule_index: Option<&'a crate::tactics::rule_index::RuleIndex>,
 }
 
 /// The result of a tactic proposal.
