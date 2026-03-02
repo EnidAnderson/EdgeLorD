@@ -93,6 +93,47 @@
       {
         "command": "maclane.undoStep",
         "title": "Mac Lane: Undo Proof Step"
+      },
+      {
+        "command": "maclane.nextGoal",
+        "title": "Mac Lane: Next Unsolved Goal"
+      },
+      {
+        "command": "maclane.prevGoal",
+        "title": "Mac Lane: Previous Unsolved Goal"
+      },
+      {
+        "command": "maclane.nextBlocker",
+        "title": "Mac Lane: Jump to First Blocker"
+      },
+      {
+        "command": "maclane.autoTactic",
+        "title": "Mac Lane: Auto Tactic (BFS)"
+      },
+      {
+        "command": "maclane.applyStrategy",
+        "title": "Mac Lane: Apply Proof Strategy"
+      },
+      {
+        "command": "maclane.findPattern",
+        "title": "Mac Lane: Find Pattern Occurrences"
+      },
+      {
+        "command": "maclane.avySelect",
+        "title": "Mac Lane: Semantic Select (Avy-Jump)"
+      },
+      {
+        "command": "maclane.multiRewrite",
+        "title": "Mac Lane: Multi-Site Rewrite"
+      },
+      {
+        "command": "maclane.tacticApplicability",
+        "title": "Mac Lane: Tactic Applicability"
+      },
+      {
+        "command": "maclane.refreshProofTree",
+        "title": "Mac Lane: Refresh Proof Tree",
+        "icon": "$(refresh)"
       }
     ],
     "views": {
@@ -101,6 +142,11 @@
           "type": "webview",
           "id": "edgelord.goalsPanel",
           "name": "Mac Lane Goals",
+          "when": "resourceLangId == maclane"
+        },
+        {
+          "id": "maclane.proofTree",
+          "name": "Proof Tree",
           "when": "resourceLangId == maclane"
         }
       ]
@@ -135,6 +181,36 @@
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g",
         "when": "editorLangId == maclane"
+      },
+      {
+        "command": "maclane.nextGoal",
+        "key": "alt+n",
+        "mac": "alt+n",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.prevGoal",
+        "key": "alt+p",
+        "mac": "alt+p",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.nextBlocker",
+        "key": "alt+b",
+        "mac": "alt+b",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.autoTactic",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.avySelect",
+        "key": "ctrl+shift+j",
+        "mac": "cmd+shift+j",
+        "when": "editorTextFocus && editorLangId == maclane"
       }
     ]
   },

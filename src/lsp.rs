@@ -107,6 +107,78 @@ fn hint_engine_tactic_prefix(action_id: &str) -> String {
         .unwrap_or_else(|| action_id.to_string())
 }
 
+// ============================================================================
+// Motivic ML: AST-level para-info detection (INV S-*)
+// ============================================================================
+
+/// Walk a `ProofState` at the **AST/structured level** for a `para-info` form.
+///
+/// Detection strategy (in order of precision):
+/// 1. A `CtxEntry` named `"para-info"` in any goal's local context
+///    (introduced by `(touch para-info)` in the motivic information doctrine).
+/// 2. A `MorExpr::Ref("para-info")` unresolved reference in any constraint
+///    morphism (pre-elaboration form).
+///
+/// Returns `Some(canonical_bytes)` — the `Debug` serialization of the matching
+/// sub-expression — for use as the `para_info_bytes` argument to
+/// `motivic_proof_fingerprint`.  Returns `None` when no structural `para-info`
+/// form is found.
+///
+/// **INV S-***: detects from proof-state structure, not from bytes containing a
+/// word.  A comment that happens to say "para-info" (inside a `SyntaxLiteral`
+/// or elsewhere) does NOT trigger this predicate.
+fn extract_para_info_payload(
+    proof_state: &comrade_lisp::proof_state::ProofState,
+) -> Option<Vec<u8>> {
+    use comrade_lisp::proof_state::{ConstraintKind, MorExpr};
+
+    // 1. Named binder "para-info" in any goal's local context
+    for goal in &proof_state.goals {
+        for entry in &goal.local_context.entries {
+            if entry.name == "para-info" {
+                // Produce canonical bytes from the binder's definition (which
+                // may be None if it's a pure `touch` declaration)
+                let canonical = format!("{:?}", &entry.def).into_bytes();
+                return Some(canonical);
+            }
+        }
+    }
+
+    // 2. Unresolved `Ref("para-info")` in constraint morphisms
+    for constraint in &proof_state.constraints {
+        let found = match &constraint.kind {
+            ConstraintKind::HasType { m, .. } => mor_expr_para_info_bytes(m),
+            ConstraintKind::MorEq { a, b } => {
+                mor_expr_para_info_bytes(a).or_else(|| mor_expr_para_info_bytes(b))
+            }
+            ConstraintKind::SrcEq { m, .. } | ConstraintKind::DstEq { m, .. } => {
+                mor_expr_para_info_bytes(m)
+            }
+            ConstraintKind::ObjEq { .. } => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    None
+}
+
+/// Recursively walk a `MorExpr`, returning `Some(Debug bytes)` of the first
+/// `Ref("para-info")` node found, or `None`.
+fn mor_expr_para_info_bytes(
+    expr: &comrade_lisp::proof_state::MorExpr,
+) -> Option<Vec<u8>> {
+    use comrade_lisp::proof_state::MorExpr;
+    match expr {
+        MorExpr::Ref(s) if s == "para-info" => Some(format!("{:?}", expr).into_bytes()),
+        MorExpr::App { args, .. } => args.iter().find_map(mor_expr_para_info_bytes),
+        MorExpr::Compose(exprs) => exprs.iter().find_map(mor_expr_para_info_bytes),
+        MorExpr::InDoctrine { term, .. } => mor_expr_para_info_bytes(term),
+        _ => None,
+    }
+}
+
 // Extract symbol at LSP position (fail-closed)
 fn symbol_at_position(text: &str, position: Position) -> Option<String> {
     // Convert LSP position to byte offset
@@ -1629,6 +1701,18 @@ impl LanguageServer for Backend {
                         "edgelord/goto-cursor".to_string(),    // SB0
                         "edgelord/undo-step".to_string(),      // SB2
                         "edgelord/resolve-anchor".to_string(), // SB3
+                        // SD0-SD4: proof tree, navigation, auto-tactic, strategies, deps
+                        "edgelord/proof-structure".to_string(),   // SD0
+                        "edgelord/next-goal".to_string(),         // SD1
+                        "edgelord/prev-goal".to_string(),         // SD1
+                        "edgelord/next-blocker".to_string(),      // SD1
+                        "edgelord/auto".to_string(),              // SD2
+                        "edgelord/apply-strategy".to_string(),    // SD3
+                        // SE0-SE4: pattern engine, overlay, avy-select, multi-rewrite, applicability
+                        "edgelord/find-pattern".to_string(),      // SE0
+                        "edgelord/select-pattern-site".to_string(), // SE2
+                        "edgelord/multi-rewrite".to_string(),     // SE3
+                        "edgelord/tactic-applicability".to_string(), // SE4
                     ],
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: None,
@@ -2197,6 +2281,190 @@ impl LanguageServer for Backend {
                 None => Ok(Some(serde_json::json!({ "error": "Anchor not found" }))),
             }
 
+        // ─── SD0: Proof tree structure ────────────────────────────────────────────
+        } else if params.command == "edgelord/proof-structure" {
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let session = self.proof_session.read().await;
+            match session.proof_structure(&uri) {
+                Some(structure) => Ok(Some(serde_json::to_value(&structure).unwrap_or(serde_json::json!({})))),
+                None => Ok(Some(serde_json::json!({ "error": "No proof state" }))),
+            }
+
+        // ─── SD1: Goal navigation ─────────────────────────────────────────────────
+        } else if params.command == "edgelord/next-goal" {
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let offset = params.arguments.first()
+                .and_then(|v| v.get("offset")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let session = self.proof_session.read().await;
+            match session.next_goal_span(&uri, offset) {
+                Some((id, span)) => {
+                    let doc_text = session.get_document_text(&uri).unwrap_or_default();
+                    let range = byte_span_to_range(&doc_text, ByteSpan::new(span.start, span.end));
+                    Ok(Some(serde_json::json!({ "metaId": id.as_u32(), "span": range })))
+                }
+                None => Ok(Some(serde_json::json!({ "error": "No goals after cursor" }))),
+            }
+
+        } else if params.command == "edgelord/prev-goal" {
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let offset = params.arguments.first()
+                .and_then(|v| v.get("offset")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let session = self.proof_session.read().await;
+            match session.prev_goal_span(&uri, offset) {
+                Some((id, span)) => {
+                    let doc_text = session.get_document_text(&uri).unwrap_or_default();
+                    let range = byte_span_to_range(&doc_text, ByteSpan::new(span.start, span.end));
+                    Ok(Some(serde_json::json!({ "metaId": id.as_u32(), "span": range })))
+                }
+                None => Ok(Some(serde_json::json!({ "error": "No goals before cursor" }))),
+            }
+
+        } else if params.command == "edgelord/next-blocker" {
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let offset = params.arguments.first()
+                .and_then(|v| v.get("offset")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let session = self.proof_session.read().await;
+            match session.first_blocker_span(&uri, offset) {
+                Some((id, span)) => {
+                    let doc_text = session.get_document_text(&uri).unwrap_or_default();
+                    let range = byte_span_to_range(&doc_text, ByteSpan::new(span.start, span.end));
+                    Ok(Some(serde_json::json!({ "metaId": id.as_u32(), "span": range })))
+                }
+                None => Ok(Some(serde_json::json!({ "error": "No blocker at cursor" }))),
+            }
+
+        // ─── SD2: Auto-tactic ────────────────────────────────────────────────────
+        } else if params.command == "edgelord/auto" {
+            use crate::tactics::auto::{auto_solve, AutoLimits};
+            use comrade_lisp::proof_state::GoalStatus;
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let bundle = doc.workspace_report.bundle.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No compiled bundle"))?;
+            let rule_index = crate::tactics::rule_index::RuleIndex::build(bundle);
+            let goal_id = proof.goals.iter()
+                .find(|g| !matches!(&g.status, GoalStatus::Solved(_)))
+                .map(|g| g.id)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No unsolved goals"))?;
+            let limits = AutoLimits::default();
+            let result = auto_solve(proof, goal_id, &rule_index, limits, |_| {});
+            Ok(Some(serde_json::to_value(&result).unwrap_or(serde_json::json!({}))))
+
+        // ─── SD3: Apply strategy ─────────────────────────────────────────────────
+        } else if params.command == "edgelord/apply-strategy" {
+            use crate::tactics::strategy::{built_in_strategies, execute_strategy};
+            use comrade_lisp::proof_state::GoalStatus;
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let strategy_name = params.arguments.first()
+                .and_then(|v| v.get("strategy")).and_then(|v| v.as_str())
+                .unwrap_or("motivic-standard").to_string();
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let bundle = doc.workspace_report.bundle.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No compiled bundle"))?;
+            let rule_index = crate::tactics::rule_index::RuleIndex::build(bundle);
+            let goal_id = proof.goals.iter()
+                .find(|g| !matches!(&g.status, GoalStatus::Solved(_)))
+                .map(|g| g.id)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No unsolved goals"))?;
+            let strategies = built_in_strategies();
+            let strategy = strategies.get(&strategy_name)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Unknown strategy"))?;
+            let result = execute_strategy(strategy, proof, goal_id, &rule_index);
+            Ok(Some(serde_json::to_value(&result).unwrap_or(serde_json::json!({}))))
+
+        // ─── SE0: Find pattern occurrences ───────────────────────────────────────
+        } else if params.command == "edgelord/find-pattern" {
+            use crate::tactics::pattern_find::find_pattern_occurrences;
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let pattern_name = params.arguments.first()
+                .and_then(|v| v.get("pattern")).and_then(|v| v.as_str())
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Missing pattern"))?
+                .to_string();
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let scope = crate::tactics::pattern_find::OccurrenceScope::UnsolvedGoals;
+            let occurrences = find_pattern_occurrences(proof, &pattern_name, &scope);
+            Ok(Some(serde_json::to_value(&occurrences).unwrap_or(serde_json::json!([]))))
+
+        // ─── SE2: Select pattern site (avy-jump) ─────────────────────────────────
+        } else if params.command == "edgelord/select-pattern-site" {
+            use crate::tactics::pattern_find::find_pattern_occurrences;
+            use crate::tactics::semantic_select::find_occurrence_by_label;
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let first_arg = params.arguments.first().cloned().unwrap_or(serde_json::json!({}));
+            let pattern_name = first_arg.get("pattern").and_then(|v| v.as_str())
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Missing pattern"))?
+                .to_string();
+            let label = first_arg.get("label").and_then(|v| v.as_str())
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Missing label"))?
+                .to_string();
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let scope = crate::tactics::pattern_find::OccurrenceScope::UnsolvedGoals;
+            let occurrences = find_pattern_occurrences(proof, &pattern_name, &scope);
+            match find_occurrence_by_label(&occurrences, &label) {
+                Some(occ) => Ok(Some(serde_json::to_value(occ).unwrap_or(serde_json::json!({})))),
+                None => Ok(Some(serde_json::json!({ "error": "No occurrence for label" }))),
+            }
+
+        // ─── SE3: Multi-site rewrite ─────────────────────────────────────────────
+        } else if params.command == "edgelord/multi-rewrite" {
+            use crate::tactics::pattern_find::{find_rule_occurrences, OccurrenceScope};
+            use crate::tactics::multi_rewrite::{multi_site_rewrite, MultiSiteStrategy};
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let first_arg = params.arguments.first().cloned().unwrap_or(serde_json::json!({}));
+            let rule_name = first_arg.get("rule").and_then(|v| v.as_str())
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Missing rule"))?
+                .to_string();
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let bundle = doc.workspace_report.bundle.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No compiled bundle"))?;
+            let rule = bundle.rules.iter().find(|r| r.name == rule_name)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Rule not found"))?;
+            let scope = OccurrenceScope::UnsolvedGoals;
+            let occurrences = find_rule_occurrences(proof, rule, &scope);
+            let doc_text = session.get_document_text(&uri).unwrap_or_default();
+            let result = multi_site_rewrite(proof, rule, occurrences, MultiSiteStrategy::All, &uri, &doc_text);
+            Ok(Some(serde_json::to_value(&result).unwrap_or(serde_json::json!({}))))
+
+        // ─── SE4: Tactic applicability index ─────────────────────────────────────
+        } else if params.command == "edgelord/tactic-applicability" {
+            use crate::tactics::applicability::tactic_applicability;
+            let uri = parse_uri_from_command_args(&params.arguments)?;
+            let rule_name = params.arguments.first()
+                .and_then(|v| v.get("rule")).and_then(|v| v.as_str())
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Missing rule"))?
+                .to_string();
+            let session = self.proof_session.read().await;
+            let doc = session.get_document(&uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Document not found"))?;
+            let proof = doc.workspace_report.proof_state.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No proof state"))?;
+            let bundle = doc.workspace_report.bundle.as_ref()
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("No compiled bundle"))?;
+            let rule = bundle.rules.iter().find(|r| r.name == rule_name)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Rule not found"))?;
+            let report = tactic_applicability(rule, proof, 4);
+            Ok(Some(serde_json::to_value(&report).unwrap_or(serde_json::json!({}))))
+
         } else {
             Ok(None)
         }
@@ -2243,6 +2511,7 @@ impl LanguageServer for Backend {
             selection: Selection { range },
             limits: TacticLimits::default(),
             rule_index: None,
+            semantic_selection: None,
         };
 
         let actions = self.tactic_registry.compute_all(&req);
@@ -2251,13 +2520,35 @@ impl LanguageServer for Backend {
         // INV T-HINT: scores are purely cosmetic re-ordering; Stonewall still verifies every edit.
         // INV D-HINT: sort is deterministic — score DESC, safety ASC, title ASC tie-break.
         let proof_bytes = format!("{:?}", proof_state).into_bytes();
+
+        // L-series motivic ML integration: detect `para-info` at AST/structural level
+        // (INV S-*: semantics from structure, not from bytes containing a word).
+        //
+        // Primary:  walk ProofState goals/constraints for Ref("para-info") or a
+        //           local-context entry named "para-info".
+        // Fallback: legacy byte-window scan kept for transition period.
+        let hint_fp: String = if let Some(para_info_bytes) = extract_para_info_payload(proof_state) {
+            // Structural detection: fingerprint the para-info sub-expression bytes
+            crate::hint_engine::motivic_proof_fingerprint(&para_info_bytes)
+        } else if proof_bytes.windows(9).any(|w| w == b"para-info") {
+            // Legacy fallback: substring scan (kept for compatibility).
+            // TODO: remove once the evaluator elaborates para-info fully at the AST level.
+            crate::hint_engine::motivic_proof_fingerprint(&proof_bytes)
+        } else {
+            // Standard path: raw proof-state fingerprint
+            let mut h = Sha256::new();
+            h.update(b"HINT_STATE_V1");
+            h.update(&proof_bytes);
+            format!("{:x}", h.finalize())
+        };
+
         let tactic_id_prefixes: Vec<String> = actions
             .iter()
             .map(|a| hint_engine_tactic_prefix(&a.action_id))
             .collect();
         let hint_engine_ref = self.hint_engine.read().await;
-        let hint_scores = hint_engine_ref.query(&proof_bytes, &tactic_id_prefixes);
-        hint_engine_ref.record_proposed(&proof_bytes, &tactic_id_prefixes);
+        let hint_scores = hint_engine_ref.query_with_motivic_hint(&hint_fp, &tactic_id_prefixes);
+        hint_engine_ref.record_proposed_with_fp(&hint_fp, &tactic_id_prefixes);
         drop(hint_engine_ref);
         let hint_score_map: BTreeMap<String, f32> = hint_scores
             .iter()

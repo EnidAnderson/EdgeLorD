@@ -129,6 +129,29 @@ pub struct UndoResult {
     pub reverse_edit: Option<WorkspaceEdit>,
 }
 
+// ─── SD0: Proof tree structures ──────────────────────────────────────────────
+
+/// A single goal entry within the proof tree view (SD0).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoalSummaryEntry {
+    pub anchor_id: String,
+    pub name: String,
+    /// "unsolved" | "solved" | "blocked" | "error"
+    pub status_tag: String,
+    pub type_summary: String,
+    pub dependencies: Vec<String>,
+}
+
+/// Top-level proof structure for the tree view (SD0).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProofStructure {
+    /// Grouped by owner key ("def/name", "rule/N", "top/N").
+    /// **INV D-***: BTreeMap guarantees stable iteration order.
+    pub groups: BTreeMap<String, Vec<GoalSummaryEntry>>,
+    pub total_goals: usize,
+    pub solved_goals: usize,
+}
+
 pub struct ProofSession {
     client: Client, // Changed from Arc<dyn ClientSink> to Client
     config: Arc<RwLock<Config>>,
@@ -806,6 +829,96 @@ impl ProofSession {
         doc.checked_boundary = checked_boundary;
         doc.workspace_report.proof_state = Some(proof_state);
         Some(UndoResult { version, reverse_edit, checked_boundary })
+    }
+
+    // ─── SD0: Proof tree structure ────────────────────────────────────────────────
+
+    /// SD0: Return the hierarchical proof structure grouped by owner.
+    pub fn proof_structure(&self, uri: &Url) -> Option<ProofStructure> {
+        let doc = self.documents.get(uri)?;
+        let proof = doc.workspace_report.proof_state.as_ref()?;
+        let index = doc.goals_index.as_ref();
+
+        let total = proof.goals.len();
+        let solved = proof.goals.iter()
+            .filter(|g| matches!(&g.status, proof_state::GoalStatus::Solved(_)))
+            .count();
+
+        let mut groups: BTreeMap<String, Vec<GoalSummaryEntry>> = BTreeMap::new();
+        for goal in &proof.goals {
+            let owner_key = match &goal.owner {
+                proof_state::HoleOwner::Def(name) => format!("def/{}", name),
+                proof_state::HoleOwner::Rule { rule_index } => format!("rule/{}", rule_index),
+                proof_state::HoleOwner::TopLevel { form_index } => format!("top/{}", form_index),
+            };
+            let anchor_id = index
+                .and_then(|idx| idx.meta_to_anchor.get(&goal.id))
+                .cloned()
+                .unwrap_or_else(|| format!("goal_{}", goal.id.as_u32()));
+            let status_tag = match &goal.status {
+                proof_state::GoalStatus::Unsolved => "unsolved",
+                proof_state::GoalStatus::Solved(_) => "solved",
+                proof_state::GoalStatus::Blocked { .. } => "blocked",
+                proof_state::GoalStatus::Inconsistent { .. } => "error",
+            }.to_string();
+            let type_summary = render_mor_type_simple(&goal.expected_type, &proof.subst);
+            let deps: Vec<String> = match &goal.status {
+                proof_state::GoalStatus::Blocked { depends_on } => depends_on.iter()
+                    .filter_map(|dep| index.and_then(|idx| idx.meta_to_anchor.get(dep)).cloned())
+                    .collect(),
+                _ => vec![],
+            };
+            groups.entry(owner_key).or_default().push(GoalSummaryEntry {
+                anchor_id,
+                name: goal.name.clone(),
+                status_tag,
+                type_summary,
+                dependencies: deps,
+            });
+        }
+        Some(ProofStructure { groups, total_goals: total, solved_goals: solved })
+    }
+
+    // ─── SD1: Goal navigation ────────────────────────────────────────────────────
+
+    /// SD1: Sorted unsolved goals by span start offset. **INV D-***: deterministic.
+    pub fn sorted_unsolved_goals_spans(&self, uri: &Url) -> Vec<(proof_state::MorMetaId, crate::document::ByteSpan)> {
+        let doc = match self.documents.get(uri) { Some(d) => d, None => return vec![] };
+        let proof = match doc.workspace_report.proof_state.as_ref() { Some(p) => p, None => return vec![] };
+        let mut goals: Vec<_> = proof.goals.iter()
+            .filter(|g| !matches!(&g.status, proof_state::GoalStatus::Solved(_)))
+            .filter_map(|g| g.span.as_ref().map(|s| (g.id, crate::document::ByteSpan::new(s.start, s.end))))
+            .collect();
+        goals.sort_by_key(|(_, span)| span.start);
+        goals
+    }
+
+    /// SD1: Next unsolved goal after `current_offset`.
+    pub fn next_goal_span(&self, uri: &Url, current_offset: usize) -> Option<(proof_state::MorMetaId, crate::document::ByteSpan)> {
+        self.sorted_unsolved_goals_spans(uri).into_iter()
+            .find(|(_, span)| span.start > current_offset)
+    }
+
+    /// SD1: Previous unsolved goal before `current_offset`.
+    pub fn prev_goal_span(&self, uri: &Url, current_offset: usize) -> Option<(proof_state::MorMetaId, crate::document::ByteSpan)> {
+        self.sorted_unsolved_goals_spans(uri).into_iter()
+            .rev()
+            .find(|(_, span)| span.end < current_offset)
+    }
+
+    /// SD1: First blocking goal for the goal at `current_offset`.
+    pub fn first_blocker_span(&self, uri: &Url, current_offset: usize) -> Option<(proof_state::MorMetaId, crate::document::ByteSpan)> {
+        let doc = self.documents.get(uri)?;
+        let proof = doc.workspace_report.proof_state.as_ref()?;
+        let goal = proof.goals.iter()
+            .find(|g| g.span.map(|s| s.start <= current_offset && current_offset < s.end).unwrap_or(false))?;
+        let blocker_ids = match &goal.status {
+            proof_state::GoalStatus::Blocked { depends_on } => depends_on.clone(),
+            _ => return None,
+        };
+        let first_id = blocker_ids.into_iter().next()?;
+        let blocker = proof.goals.iter().find(|g| g.id == first_id)?;
+        blocker.span.as_ref().map(|s| (blocker.id, crate::document::ByteSpan::new(s.start, s.end)))
     }
 
     pub fn compute_goals_panel(&self, uri: &Url) -> Option<crate::goals_panel::GoalsPanelResponse> {

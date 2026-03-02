@@ -37,6 +37,8 @@ pub struct TacticRequest<'a> {
     pub limits: TacticLimits,
     /// SC0: Optional rule index for doctrine-aware rule queries.
     pub rule_index: Option<&'a crate::tactics::rule_index::RuleIndex>,
+    /// SE2: Active semantic (pattern) selection — overrides cursor-based goal targeting.
+    pub semantic_selection: Option<crate::tactics::semantic_select::SemanticSelection>,
 }
 
 /// The result of a tactic proposal.
