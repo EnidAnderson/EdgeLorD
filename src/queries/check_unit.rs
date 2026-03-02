@@ -24,7 +24,7 @@ use tower_lsp::lsp_types::Diagnostic;
 /// 1. **unit_content**: Source code bytes
 /// 2. **compile_options**: Pretty printer dialect, feature flags, etc.
 /// 3. **workspace_snapshot**: All open documents (conservative dependency model)
-/// 4. **file_id**: Stable file identifier (CRC32 of URI)
+/// 4. **file_identity**: Stable cryptographic file identity digest
 ///
 /// Serialization: Canonical byte ordering (sorted collections, explicit separators)
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,8 +39,8 @@ pub struct CompileInputV1 {
     /// Conservative model: any workspace change invalidates cache
     pub workspace_snapshot: BTreeMap<String, Vec<u8>>, // URI -> content hash
 
-    /// Stable file identifier (CRC32 of URI)
-    pub file_id: u32,
+    /// Stable cryptographic file identity digest
+    pub file_identity: HashValue,
 
     /// Input digest: hash of this entire struct's canonical serialization
     /// Computed at query execution time; used as the memo key
@@ -53,12 +53,12 @@ impl CompileInputV1 {
         unit_content: &[u8],
         compile_options: &BTreeMap<String, String>,
         workspace_snapshot: &BTreeMap<String, Vec<u8>>,
-        file_id: u32,
+        file_identity: HashValue,
     ) -> HashValue {
         let mut canonical_bytes = Vec::new();
 
-        // 1. File ID (4 bytes, little-endian)
-        canonical_bytes.extend_from_slice(&file_id.to_le_bytes());
+        // 1. File identity digest bytes
+        canonical_bytes.extend_from_slice(file_identity.as_bytes());
 
         // 2. Unit content (length-prefixed, deterministic)
         canonical_bytes.extend_from_slice(&(unit_content.len() as u64).to_le_bytes());
@@ -92,16 +92,16 @@ impl CompileInputV1 {
         unit_content: Vec<u8>,
         compile_options: BTreeMap<String, String>,
         workspace_snapshot: BTreeMap<String, Vec<u8>>,
-        file_id: u32,
+        file_identity: HashValue,
     ) -> Self {
         let input_digest =
-            Self::compute_digest(&unit_content, &compile_options, &workspace_snapshot, file_id);
+            Self::compute_digest(&unit_content, &compile_options, &workspace_snapshot, file_identity);
 
         CompileInputV1 {
             unit_content,
             compile_options,
             workspace_snapshot,
-            file_id,
+            file_identity,
             input_digest,
         }
     }
@@ -210,14 +210,12 @@ mod tests {
         snapshot.insert("file:///foo.ml".to_string(), b"content1".to_vec());
 
         // Create two inputs with identical data
-        let input1 = CompileInputV1::new(
-            unit_content.clone(),
-            opts.clone(),
-            snapshot.clone(),
-            12345,
-        );
+        let file_identity = HashValue::hash_with_domain(b"URI_ID", b"file:///foo.ml");
+        let input1 =
+            CompileInputV1::new(unit_content.clone(), opts.clone(), snapshot.clone(), file_identity);
 
-        let input2 = CompileInputV1::new(unit_content.clone(), opts.clone(), snapshot.clone(), 12345);
+        let input2 =
+            CompileInputV1::new(unit_content.clone(), opts.clone(), snapshot.clone(), file_identity);
 
         // Digests must be identical (determinism)
         assert_eq!(input1.input_digest, input2.input_digest);
@@ -231,9 +229,20 @@ mod tests {
         let mut snapshot = BTreeMap::new();
         snapshot.insert("file:///foo.ml".to_string(), b"content1".to_vec());
 
-        let input1 = CompileInputV1::new(b"content1".to_vec(), opts.clone(), snapshot.clone(), 12345);
+        let file_identity = HashValue::hash_with_domain(b"URI_ID", b"file:///foo.ml");
+        let input1 = CompileInputV1::new(
+            b"content1".to_vec(),
+            opts.clone(),
+            snapshot.clone(),
+            file_identity,
+        );
 
-        let input2 = CompileInputV1::new(b"content2".to_vec(), opts.clone(), snapshot.clone(), 12345);
+        let input2 = CompileInputV1::new(
+            b"content2".to_vec(),
+            opts.clone(),
+            snapshot.clone(),
+            file_identity,
+        );
 
         // Different content → different digest
         assert_ne!(input1.input_digest, input2.input_digest);
@@ -250,8 +259,9 @@ mod tests {
         let mut snapshot = BTreeMap::new();
         snapshot.insert("file:///foo.ml".to_string(), b"content".to_vec());
 
-        let input1 = CompileInputV1::new(b"content".to_vec(), opts1, snapshot.clone(), 12345);
-        let input2 = CompileInputV1::new(b"content".to_vec(), opts2, snapshot.clone(), 12345);
+        let file_identity = HashValue::hash_with_domain(b"URI_ID", b"file:///foo.ml");
+        let input1 = CompileInputV1::new(b"content".to_vec(), opts1, snapshot.clone(), file_identity);
+        let input2 = CompileInputV1::new(b"content".to_vec(), opts2, snapshot.clone(), file_identity);
 
         // Different options → different digest
         assert_ne!(input1.input_digest, input2.input_digest);

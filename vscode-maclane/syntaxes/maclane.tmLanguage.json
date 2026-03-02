@@ -1,0 +1,186 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mac Lane",
+  "scopeName": "source.maclane",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#quoted-form" },
+    { "include": "#special-form" },
+    { "include": "#number" },
+    { "include": "#meta-variable" },
+    { "include": "#constant" },
+    { "include": "#module-path" },
+    { "include": "#brackets" },
+    { "include": "#symbol" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.line.semicolon.maclane",
+          "match": ";.*$"
+        }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.maclane",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.maclane",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "quoted-form": {
+      "patterns": [
+        {
+          "name": "keyword.operator.quote.maclane",
+          "match": "'(?=[({\\[])"
+        },
+        {
+          "name": "keyword.operator.quasiquote.maclane",
+          "match": "`(?=[({\\[])"
+        },
+        {
+          "name": "keyword.operator.unquote-splicing.maclane",
+          "match": ",@"
+        },
+        {
+          "name": "keyword.operator.unquote.maclane",
+          "match": ",(?=[^@])"
+        }
+      ]
+    },
+    "special-form": {
+      "patterns": [
+        {
+          "comment": "Core form keywords: (def ...), (rule ...), etc.",
+          "match": "(?<=\\()\\s*(def|define|define-facet|touch|rule|sugar|let|begin|do|lambda|fn|if|cond|match|case|use|in|module|export|import|require|set!|cons|context|goal|coherence|assert|assert-coherent|check|verify|quote|quasiquote|unquote|unquote-splicing)(?=[\\s)])",
+          "captures": {
+            "1": { "name": "keyword.control.maclane" }
+          }
+        },
+        {
+          "comment": "(def NAME ...) — highlight defined name",
+          "match": "(?<=\\(def\\s+)([a-zA-Z_?!*+\\-=<>:/][a-zA-Z0-9_?!*+\\-=<>:/.'∞Σ∏Ω⊗⊕⊸□◇♯♭ʃ]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.maclane" }
+          }
+        },
+        {
+          "comment": "(touch NAME ...) — highlight declared name",
+          "match": "(?<=\\(touch\\s+)([a-zA-Z_?!*+\\-=<>:/][a-zA-Z0-9_?!*+\\-=<>:/.'∞Σ∏Ω⊗⊕⊸□◇♯♭ʃ]*)",
+          "captures": {
+            "1": { "name": "variable.other.declaration.maclane" }
+          }
+        },
+        {
+          "comment": "(rule NAME ...) — highlight rule name",
+          "match": "(?<=\\(rule\\s+)([a-zA-Z_?!*+\\-=<>:/][a-zA-Z0-9_?!*+\\-=<>:/.'∞Σ∏Ω⊗⊕⊸□◇♯♭ʃ]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.rule.maclane" }
+          }
+        },
+        {
+          "comment": "(sugar NAME ...) — highlight sugar name",
+          "match": "(?<=\\(sugar\\s+)([a-zA-Z_?!*+\\-=<>:/][a-zA-Z0-9_?!*+\\-=<>:/.'∞Σ∏Ω⊗⊕⊸□◇♯♭ʃ]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.sugar.maclane" }
+          }
+        },
+        {
+          "comment": "(in DOCTRINE ...) — highlight doctrine name as type",
+          "match": "(?<=\\(in\\s+)([a-zA-Z_][a-zA-Z0-9_\\-]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.doctrine.maclane" }
+          }
+        },
+        {
+          "comment": "Prelude / motivic operations in call position",
+          "match": "(?<=\\()\\s*(normalize|transport|coherent\\?|classify-reduction|compose-recipes|check-diagram-coherence|tensor|oplus|hom|eval|curry|picard|tate|spectrum|pullback|suspension-trace|loop-trace|tate-twist-trace|tate-shift-trace|localization-trace|transport-trace|w-derivation-trace|internal-hom-trace|eval-trace|curry-trace|dual-trace|exact-triangle-trace|linear-trace|six-functor-trace|spectral-trace|diff-functor-trace|kahler-trace|connection-trace|holonomy-trace|jet-trace|check-[a-zA-Z\\-]+|grade/[a-zA-Z\\-]+|prelude/[a-zA-Z\\-]+|adjoint/[a-zA-Z\\-]+|facet/[a-zA-Z\\-]+|doctrine/[a-zA-Z\\-]+)(?=[\\s)])",
+          "captures": {
+            "1": { "name": "support.function.builtin.maclane" }
+          }
+        },
+        {
+          "comment": "Generic function call head (first symbol in a list)",
+          "match": "(?<=\\()\\s*([a-zA-Z_][a-zA-Z0-9_?!*+\\-=<>:/.'∞Σ∏Ω⊗⊕⊸□◇♯♭ʃ]*)(?=[\\s)])",
+          "captures": {
+            "1": { "name": "entity.name.function.call.maclane" }
+          }
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.integer.maclane",
+          "match": "(?<=[\\s(\\[{])-?[0-9]+(?=[\\s)\\]}]|$)"
+        }
+      ]
+    },
+    "meta-variable": {
+      "patterns": [
+        {
+          "comment": "Pattern variables: ?x, ?*xs, ?A",
+          "name": "variable.parameter.pattern.maclane",
+          "match": "\\?\\*?[a-zA-Z_][a-zA-Z0-9_\\-]*"
+        }
+      ]
+    },
+    "constant": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.maclane",
+          "match": "(?<=[\\s(\\[{])(true|false|nil|#t|#f)(?=[\\s)\\]}]|$)"
+        }
+      ]
+    },
+    "module-path": {
+      "patterns": [
+        {
+          "comment": "Module::Path references (e.g. MadLib::Facets::Equality)",
+          "name": "entity.name.namespace.maclane",
+          "match": "[A-Z][a-zA-Z0-9_]*(::)[A-Z][a-zA-Z0-9_:]*(::)?[a-zA-Z0-9_:]*",
+          "captures": {
+            "1": { "name": "punctuation.separator.namespace.maclane" }
+          }
+        }
+      ]
+    },
+    "brackets": {
+      "patterns": [
+        {
+          "name": "punctuation.paren.open.maclane",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.paren.close.maclane",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.bracket.open.maclane",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.bracket.close.maclane",
+          "match": "\\]"
+        }
+      ]
+    },
+    "symbol": {
+      "patterns": [
+        {
+          "comment": "Metadata keys inside quoted forms",
+          "match": "(?<='\\()\\s*(meta|priority|kind|proof|law|provenance|axiom|theorem|lemma|classes|origin|certified|structural)(?=[\\s)])",
+          "captures": {
+            "1": { "name": "support.type.property-name.maclane" }
+          }
+        }
+      ]
+    }
+  }
+}

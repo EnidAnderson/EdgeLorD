@@ -1,6 +1,6 @@
 use comrade_lisp::diagnostics::pretty::{PrettyCtx, PrettyPrinter, PrettyDialect, PrettyLimits, PrinterRegistry, PrinterKey};
 use comrade_lisp::diagnostics::DiagnosticContext;
-use comrade_lisp::proof_state::ProofState;
+use comrade_lisp::proof_state::{ProofState, MorType, LocalContext};
 use tower_lsp::lsp_types::Url;
 
 /// Ephemeral pretty-printing context for LSP requests.
@@ -45,6 +45,40 @@ impl<'a> EdgeLordPrettyCtx<'a> {
 
     pub fn document_uri(&self) -> &'a Url {
         self.document_uri
+    }
+
+    /// Render a `MorType` using the configured printer dialect.
+    ///
+    /// Delegates to `PrettyPrinter::render_type`, which formats as `"src → dst"`
+    /// with dialect-appropriate arrow style.  The substitution stored in
+    /// `self.proof.subst` is applied automatically by the printer.
+    ///
+    /// **INV D-*:** deterministic.
+    pub fn render_mor_type(&self, ty: &MorType) -> String {
+        self.printer.render_type(self, ty)
+    }
+
+    /// Render a `LocalContext` as a multi-line Markdown-friendly string.
+    ///
+    /// Each entry is formatted as `"  {name} : {type}"`, one per line.
+    /// Returns `"*(empty context)*"` when the context is empty, so hover
+    /// output is always non-empty.
+    ///
+    /// **INV D-*:** entries are in scope order (outermost first) which is
+    /// the canonical deterministic order from elaboration.
+    pub fn render_local_context(&self, ctx: &LocalContext) -> String {
+        if ctx.entries.is_empty() {
+            return "*(empty context)*".to_string();
+        }
+        let mut lines = Vec::new();
+        for entry in &ctx.entries {
+            let ty_str = match &entry.ty {
+                Some(ty) => self.render_mor_type(ty),
+                None => "_".to_string(),
+            };
+            lines.push(format!("  {} : {}", entry.name, ty_str));
+        }
+        lines.join("\n")
     }
 }
 

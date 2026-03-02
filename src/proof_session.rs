@@ -4,7 +4,7 @@ use std::{collections::{BTreeMap, VecDeque}, sync::Arc, time::Instant as StdInst
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use tower_lsp::{
-    lsp_types::{Diagnostic, MessageType, TextDocumentContentChangeEvent, Url},
+    lsp_types::{Diagnostic, MessageType, TextDocumentContentChangeEvent, Url, WorkspaceEdit},
     Client, // Added Client import
 };
 
@@ -20,6 +20,7 @@ use comrade_lisp::proof_state;
 use comrade_lisp::diagnostics;
 use comrade_lisp::ContentChange;
 use codeswitch::fingerprint::HashValue;
+use sha2::{Digest, Sha256};
 use sniper_db::SniperDatabase;
 use hex;  // C2.4: For fingerprint hex encoding
 
@@ -86,6 +87,10 @@ pub struct ProofSnapshot {
     pub timestamp: Instant,
     pub proof_state: proof_state::ProofState,
     pub goals_index: GoalsPanelIndex,
+    /// SB2: boundary at which this state was checked (None = full document)
+    pub checked_boundary: Option<usize>,
+    /// SB2: reverse workspace edit to undo any text mutation that created this state
+    pub reverse_edit: Option<WorkspaceEdit>,
 }
 
 pub struct ProofDocument {
@@ -95,6 +100,9 @@ pub struct ProofDocument {
     pub workspace_report: WorkspaceReport,
     pub goals_index: Option<GoalsPanelIndex>, // NEW: Stable anchor index
     pub history: VecDeque<ProofSnapshot>, // NEW: Semantic snapshots
+    /// SB0: Proof-stepping boundary. `None` = elaborate full document.
+    /// `Some(offset)` = only text[..offset] has been elaborated.
+    pub checked_boundary: Option<usize>,
 }
 
 pub struct ProofSessionOpenResult {
@@ -108,6 +116,17 @@ pub struct ProofSessionUpdateResult {
     pub diagnostics: Vec<Diagnostic>,
     pub goals: Vec<Goal>,
     pub measurement: Option<BenchmarkMeasurement>,  // C2.4: Optional for benchmarking
+}
+
+/// SB2: Return value of `ProofSession::undo_step`.
+#[derive(serde::Serialize)]
+pub struct UndoResult {
+    /// Version of the restored snapshot.
+    pub version: i32,
+    /// The checked boundary after restore (`None` = full document was checked).
+    pub checked_boundary: Option<usize>,
+    /// Reverse workspace edit to undo an associated text mutation (may be `None`).
+    pub reverse_edit: Option<WorkspaceEdit>,
 }
 
 pub struct ProofSession {
@@ -183,10 +202,10 @@ impl ProofSession {
                 timestamp: Instant::now(),
                 proof_state: ps.clone(),
                 goals_index: index.clone(),
+                checked_boundary: None,
+                reverse_edit: None,
             });
         }
-
-        // Reindex workspace for Loogle if bundle is available
         if let Some(ref bundle) = report.bundle {
             if let Err(e) = self.loogle_indexer.reindex(bundle) {
                 self.client.log_message(
@@ -203,6 +222,7 @@ impl ProofSession {
             workspace_report: report.clone(),
             goals_index,
             history,
+            checked_boundary: None, // SB0: full elaboration by default
         });
 
         ProofSessionOpenResult {
@@ -251,7 +271,7 @@ impl ProofSession {
 
         // Compute all inputs before checking ANY cache (ensures sound reuse)
         let unit_content_hash = HashValue::hash_with_domain(b"SOURCE_TEXT", updated_text.as_bytes());
-        let file_id = uri_to_file_id(&uri);
+        let file_id = uri_cache_slot(&uri);
 
         // Read compile options from config (canonical ordering required)
         let config = self.config.read().await;
@@ -306,6 +326,8 @@ impl ProofSession {
                         timestamp: Instant::now(),
                         proof_state: ps.clone(),
                         goals_index,
+                        checked_boundary: None,
+                        reverse_edit: None,
                     });
                     if history.len() > 10 {
                         history.pop_front();
@@ -319,6 +341,7 @@ impl ProofSession {
                     workspace_report: snapshot.report.clone(),
                     goals_index: None, // Will be recomputed if needed
                     history,
+                    checked_boundary: None,
                 });
 
                 // C2.4: Return measurement for Phase 1 hit
@@ -471,6 +494,8 @@ impl ProofSession {
                 timestamp: Instant::now(),
                 proof_state: ps.clone(),
                 goals_index: index.clone(),
+                checked_boundary: None,
+                reverse_edit: None,
             });
             if history.len() > 10 {
                 history.pop_front();
@@ -494,6 +519,7 @@ impl ProofSession {
             workspace_report: report.clone(),
             goals_index,
             history,
+            checked_boundary: None, // SB0: full elaboration resets boundary
         });
 
         // C2.4: Collect final measurement with all 19 CSV fields
@@ -613,6 +639,175 @@ impl ProofSession {
         }
     }
 
+    // ─── SB0: Proof-stepping commands ────────────────────────────────────────
+
+    /// Advance the checked boundary to the end of the next top-level form.
+    ///
+    /// Returns the new boundary offset, or `None` if already at the last form.
+    /// **INV S-STEP:** the returned `ProofState` equals full elaboration of
+    /// the forms in 0..new_boundary.
+    pub fn step_forward(&mut self, uri: &Url) -> Option<usize> {
+        let current = self.documents.get(uri)?.checked_boundary.unwrap_or(0);
+        let boundaries = self.documents.get(uri)?.parsed.top_level_form_boundaries();
+        let next = *boundaries.iter().find(|&&b| b > current)?;
+        self.elaborate_up_to(uri, next);
+        Some(next)
+    }
+
+    /// Retract the checked boundary to the end of the previous top-level form.
+    ///
+    /// Returns the new boundary offset. If already at the beginning returns `Some(0)`.
+    pub fn step_backward(&mut self, uri: &Url) -> Option<usize> {
+        let current = self.documents.get(uri)?.checked_boundary.unwrap_or(usize::MAX);
+        let boundaries = self.documents.get(uri)?.parsed.top_level_form_boundaries();
+        // boundary = 0 means "no forms checked"; anything smaller than the first real boundary
+        let prev = boundaries.iter().rev().find(|&&b| b < current).copied().unwrap_or(0);
+        self.elaborate_up_to(uri, prev);
+        Some(prev)
+    }
+
+    /// Snap the checked boundary to the nearest form boundary at or before `cursor_offset`.
+    ///
+    /// Returns the new boundary offset.
+    pub fn goto_cursor(&mut self, uri: &Url, cursor_offset: usize) -> Option<usize> {
+        let boundaries = self.documents.get(uri)?.parsed.top_level_form_boundaries();
+        let target = boundaries.iter().rev()
+            .find(|&&b| b <= cursor_offset)
+            .copied()
+            .unwrap_or(0);
+        self.elaborate_up_to(uri, target);
+        Some(target)
+    }
+
+    /// Re-elaborate the document up to `boundary` bytes and store the result.
+    ///
+    /// Uses `ComradeWorkspace::set_document_text` + `report_for_key` so the
+    /// external workspace state stays consistent.
+    ///
+    /// **INV S-STEP:** calls into the same elaboration pipeline as full
+    /// elaboration; the only difference is the text length.
+    fn elaborate_up_to(&mut self, uri: &Url, boundary: usize) {
+        let key = uri.to_string();
+        let text = match self.documents.get(uri) {
+            Some(d) => d.parsed.text.clone(),
+            None => return,
+        };
+
+        // Slice at boundary; boundary=0 gives an empty document (all goals disappear)
+        let partial_text = if boundary == 0 {
+            ""
+        } else if boundary >= text.len() {
+            text.as_str()
+        } else {
+            &text[..boundary]
+        };
+
+        // Re-elaborate through workspace
+        let report = match self.workspace.set_document_text(&key, partial_text)
+            .and_then(|_| self.workspace.report_for_key(&key))
+        {
+            Ok(r) => r,
+            Err(e) => workspace_error_report(&e),
+        };
+
+        let partial_parsed = ParsedDocument::parse(partial_text.to_string());
+        let diag_ctx = DiagnosticContext::new(key.clone(), &key);
+        let goals_index = report.proof_state.as_ref().map(|ps| {
+            GoalsPanelIndex::new(ps, &diag_ctx)
+        });
+
+        if let Some(doc) = self.documents.get_mut(uri) {
+            if let (Some(ps), Some(idx)) = (report.proof_state.as_ref(), goals_index.as_ref()) {
+                doc.history.push_back(ProofSnapshot {
+                    version: doc.version,
+                    timestamp: Instant::now(),
+                    proof_state: ps.clone(),
+                    goals_index: idx.clone(),
+                    checked_boundary: Some(boundary),
+                    reverse_edit: None,
+                });
+                // Cap history at 50 entries (INV D-MEMORY)
+                while doc.history.len() > 50 {
+                    doc.history.pop_front();
+                }
+            }
+            doc.goals_index = goals_index;
+            doc.workspace_report = report;
+            doc.checked_boundary = Some(boundary);
+            doc.parsed = partial_parsed;
+        }
+    }
+
+    // ─── SB1: Human-readable delta summary ───────────────────────────────────
+
+    /// A one-line description of what changed since the previous snapshot.
+    ///
+    /// Returns `None` when there is no meaningful change. Used by the
+    /// `$/edgelord/goalsUpdated` notification (SB1).
+    ///
+    /// **INV D-*:** deterministic — iterates `panel.goals` in anchor-sorted order.
+    pub fn delta_summary(&self, uri: &Url) -> Option<String> {
+        use crate::goals_panel::{GoalChangeKind, GoalStatus};
+        let panel = self.compute_goals_panel(uri)?;
+        let (mut added, mut removed, mut solved) = (0usize, 0usize, 0usize);
+        for item in &panel.goals {
+            if let Some(delta) = &item.delta {
+                for change in &delta.changes {
+                    match change {
+                        GoalChangeKind::Added => added += 1,
+                        GoalChangeKind::Removed => removed += 1,
+                        GoalChangeKind::StatusChanged { new_status, .. } => {
+                            if matches!(new_status, GoalStatus::SOLVED) {
+                                solved += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if added == 0 && removed == 0 && solved == 0 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if solved > 0 { parts.push(format!("{} solved", solved)); }
+        if added > 0  { parts.push(format!("{} new", added)); }
+        if removed > 0 { parts.push(format!("{} removed", removed)); }
+        Some(parts.join(", "))
+    }
+
+    // ─── SB2: Snapshot-based undo ────────────────────────────────────────────
+
+    /// Pop the most recent proof snapshot and restore the document to the
+    /// previous state (second-to-last history entry).
+    ///
+    /// **INV S-UNDO**: restores the exact previous `ProofState` without text
+    /// re-elaboration.  The caller is responsible for applying
+    /// `result.reverse_edit` if a text mutation should also be reversed.
+    ///
+    /// Returns `None` if there are fewer than 2 history entries (nothing to undo).
+    pub fn undo_step(&mut self, uri: &Url) -> Option<UndoResult> {
+        let doc = self.documents.get_mut(uri)?;
+        // Need at least current + one previous entry
+        if doc.history.len() < 2 {
+            return None;
+        }
+        // Remove the current (most-recent) state from history
+        doc.history.pop_back();
+        // Restore from what is now the last entry (the previous state)
+        let prev = doc.history.back()?;
+        let version = prev.version;
+        let goals_index = Some(prev.goals_index.clone());
+        let checked_boundary = prev.checked_boundary;
+        let reverse_edit = prev.reverse_edit.clone();
+        let proof_state = prev.proof_state.clone();
+        // Apply the restore
+        doc.goals_index = goals_index;
+        doc.checked_boundary = checked_boundary;
+        doc.workspace_report.proof_state = Some(proof_state);
+        Some(UndoResult { version, reverse_edit, checked_boundary })
+    }
+
     pub fn compute_goals_panel(&self, uri: &Url) -> Option<crate::goals_panel::GoalsPanelResponse> {
     let doc = self.documents.get(uri)?;
     let index = doc.goals_index.as_ref()?;
@@ -715,7 +910,7 @@ impl ProofSession {
 
             items.push(crate::goals_panel::GoalPanelItem {
                 id: anchor_id.clone(),
-                label: format!("?{} : ...", goal.name), // TODO: Pretty print type
+                label: format!("?{} : {}", goal.name, render_mor_type_simple(&goal.expected_type, &ps.subst)),
                 status,
                 range,
                 blockers,
@@ -733,6 +928,72 @@ impl ProofSession {
         banner,
     })
 }
+}
+
+// ─── Type rendering helpers ──────────────────────────────────────────────────
+
+/// Render an `ObjExpr` to a compact string without requiring a `PrettyCtx`.
+///
+/// Used as a fallback when no `PrinterRegistry` is available (e.g. inside
+/// `compute_ui_goals` which has no handle to a `PrettyCtx`).
+///
+/// **INV D-*:** deterministic — same input → same output.
+fn render_obj_simple(obj: &proof_state::ObjExpr) -> String {
+    match obj {
+        proof_state::ObjExpr::Known(id) => format!("O{}", id.index()),
+        proof_state::ObjExpr::Meta(m) => format!("\u{03b1}{}", m.0),  // α<n>
+        proof_state::ObjExpr::ErrorHole(_) => "\u{26a0}".to_string(), // ⚠
+    }
+}
+
+/// Render a `MorType` to `"src → dst"` using the current substitution.
+///
+/// Applies the substitution first to resolve any solved object metavariables,
+/// then falls back to `render_obj_simple` for anything still unknown.
+///
+/// **INV D-*:** deterministic.
+fn render_mor_type_simple(
+    ty: &proof_state::MorType,
+    subst: &proof_state::MetaSubst,
+) -> String {
+    let resolved = subst.apply_mor_type(ty);
+    let src = render_obj_simple(&resolved.src);
+    let dst = render_obj_simple(&resolved.dst);
+    format!("{} \u{2192} {}", src, dst) // "src → dst"
+}
+
+/// Find the "active goal" at a byte offset.
+///
+/// Returns the innermost `GoalState` whose span contains `offset` (by smallest
+/// span length). Falls back to the goal with the nearest *preceding* span end
+/// if no goal contains the offset.
+///
+/// **INV D-*:** deterministic — iteration over `proof.goals` is ordered by
+/// `MorMetaId` (u32), so same inputs → same output.
+pub fn goal_enclosing_offset<'p>(
+    proof: &'p proof_state::ProofState,
+    offset: usize,
+) -> Option<&'p proof_state::GoalState> {
+    // Pass 1: smallest enclosing span
+    let containing = proof
+        .goals
+        .iter()
+        .filter(|g| {
+            g.span
+                .map_or(false, |s| s.start <= offset && offset <= s.end)
+        })
+        .min_by_key(|g| g.span.map_or(usize::MAX, |s| s.end - s.start));
+
+    if containing.is_some() {
+        return containing;
+    }
+
+    // Pass 2: nearest preceding goal (span end ≤ offset)
+    proof
+        .goals
+        .iter()
+        .filter(|g| g.span.map_or(false, |s| s.end <= offset))
+        .max_by_key(|g| g.span.map_or(0, |s| s.end))
 }
 
 // Helper to project ProofState goals into UI Goal structs with stable IDs
@@ -783,7 +1044,7 @@ fn compute_ui_goals(
                 name: Some(goal.name.clone()),
                 span,
                 context,
-                target: "TODO: Render Type".to_string(), // We need PrettyCtx here eventually
+                target: render_mor_type_simple(&goal.expected_type, &ps.subst),
             });
         }
     }
@@ -915,9 +1176,13 @@ fn compute_workspace_snapshot_hash(
 
 /// Phase 1: Convert URI to file ID for module snapshot cache.
 ///
-/// Uses CRC32 hash of URI string for deterministic, stable file identification.
-fn uri_to_file_id(uri: &Url) -> u32 {
-    crc32fast::hash(uri.as_str().as_bytes())
+/// Uses SHA-256 (domain separated) and derives a deterministic u32 adapter for SniperDB.
+fn uri_cache_slot(uri: &Url) -> u32 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"EDGE_URI_FILE_ID_V1");
+    hasher.update(uri.as_str().as_bytes());
+    let digest = hasher.finalize();
+    u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
 }
 
 /// Phase 1: Compute options fingerprint from canonical compile options.
@@ -1028,4 +1293,3 @@ fn hash_to_fp8(hash: &HashValue) -> String {
 fn bytes_open_docs(documents: &BTreeMap<Url, ProofDocument>) -> usize {
     documents.values().map(|doc| doc.parsed.text.len()).sum()
 }
-

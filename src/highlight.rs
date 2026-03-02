@@ -1,5 +1,3 @@
-
-
 use tower_lsp::lsp_types::{SemanticToken, SemanticTokenType, SemanticTokenModifier};
 use crate::document::ByteSpan;
 use comrade_lisp::parser;
@@ -11,20 +9,38 @@ pub struct HighlightCtx<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolRole {
+    /// Core language forms: def, rule, touch, let, begin, sugar, use, in, lambda, ...
     KernelHead,
+    /// Binding occurrences in touch, let, lambda parameter lists
     Binder,
+    /// Name introduced by (def name ...)
     Definition,
+    /// Name of a rewrite rule: (rule name ...)
     RuleName,
+    /// Type/sort names: doctrine names, module paths
     FacetSort,
+    /// Function/operation in call position (head of a non-special list)
     FacetOp,
+    /// Constants: true, false, nil
     FacetConst,
+    /// Pattern/meta variables: ?x, ?*xs
     Meta,
-    Structural, // Parens, dots
+    /// Parentheses, brackets
+    Structural,
+    /// String literals
     String,
+    /// ; line comments
     Comment,
+    /// Integer literals
     Number,
-    Keyword, // General keyword if not kernel head
+    /// Built-in operations: prelude/motivic dispatched operations
+    Keyword,
+    /// Unclassified identifiers
     Unknown,
+    /// Module path segments in (use Module::Path ...)
+    Namespace,
+    /// Quoted metadata: '(meta ...) blocks
+    Property,
 }
 
 impl SymbolRole {
@@ -32,47 +48,52 @@ impl SymbolRole {
         match self {
             SymbolRole::KernelHead => SemanticTokenType::KEYWORD,
             SymbolRole::Binder => SemanticTokenType::VARIABLE,
-            SymbolRole::Definition => SemanticTokenType::VARIABLE, // + DECLARATION
+            SymbolRole::Definition => SemanticTokenType::VARIABLE,
             SymbolRole::RuleName => SemanticTokenType::FUNCTION,
             SymbolRole::FacetSort => SemanticTokenType::TYPE,
             SymbolRole::FacetOp => SemanticTokenType::FUNCTION,
-            SymbolRole::FacetConst => SemanticTokenType::VARIABLE, // + READONLY
-            SymbolRole::Meta => SemanticTokenType::VARIABLE, // + MODIFICATION
+            SymbolRole::FacetConst => SemanticTokenType::ENUM_MEMBER,
+            SymbolRole::Meta => SemanticTokenType::PARAMETER,
             SymbolRole::Structural => SemanticTokenType::OPERATOR,
             SymbolRole::String => SemanticTokenType::STRING,
             SymbolRole::Comment => SemanticTokenType::COMMENT,
             SymbolRole::Number => SemanticTokenType::NUMBER,
             SymbolRole::Keyword => SemanticTokenType::KEYWORD,
             SymbolRole::Unknown => SemanticTokenType::VARIABLE,
+            SymbolRole::Namespace => SemanticTokenType::NAMESPACE,
+            SymbolRole::Property => SemanticTokenType::PROPERTY,
         }
     }
 
     pub fn modifiers(&self) -> u32 {
-        let mut bits = 0;
+        // Modifier bit indices match LEGEND_TOKEN_MODIFIERS order:
+        // 0: declaration, 1: definition, 2: readonly, 3: static,
+        // 4: deprecated, 5: abstract, 6: async, 7: modification,
+        // 8: documentation, 9: defaultLibrary
         match self {
-            SymbolRole::Definition => bits |= 1 << 0, // DECLARATION (assumed index 0)
-            SymbolRole::FacetConst => bits |= 1 << 1, // READONLY
-            SymbolRole::Meta => bits |= 1 << 2, // MODIFICATION? No, standard ones only?
-            // We need to match the Legend defined in server capabilities.
-            // Standard modifiers: declaration, definition, readonly, static, deprecated, abstract, async, modification, documentation, defaultLibrary
-            // Let's assume a standard legend order for now:
-            // 0: declaration, 1: definition, 2: readonly, 3: static, 4: deprecated, 5: abstract, 6: async, 7: modification, 8: documentation, 9: defaultLibrary
-            SymbolRole::KernelHead => bits |= 1 << 9, // defaultLibrary
-            _ => {},
+            SymbolRole::Definition => 1 << 0,  // declaration
+            SymbolRole::FacetConst => 1 << 2,  // readonly
+            SymbolRole::Meta => 1 << 7,        // modification
+            SymbolRole::KernelHead => 1 << 9,  // defaultLibrary
+            SymbolRole::Keyword => 1 << 9,     // defaultLibrary
+            _ => 0,
         }
-        bits
     }
 }
 
 pub const LEGEND_TOKEN_TYPES: &[SemanticTokenType] = &[
-    SemanticTokenType::KEYWORD,
-    SemanticTokenType::VARIABLE,
-    SemanticTokenType::FUNCTION,
-    SemanticTokenType::TYPE,
-    SemanticTokenType::OPERATOR,
-    SemanticTokenType::STRING,
-    SemanticTokenType::COMMENT,
-    SemanticTokenType::NUMBER,
+    SemanticTokenType::KEYWORD,       // 0
+    SemanticTokenType::VARIABLE,      // 1
+    SemanticTokenType::FUNCTION,      // 2
+    SemanticTokenType::TYPE,          // 3
+    SemanticTokenType::OPERATOR,      // 4
+    SemanticTokenType::STRING,        // 5
+    SemanticTokenType::COMMENT,       // 6
+    SemanticTokenType::NUMBER,        // 7
+    SemanticTokenType::ENUM_MEMBER,   // 8  (for constants: true/false/nil)
+    SemanticTokenType::PARAMETER,     // 9  (for meta/pattern variables: ?x)
+    SemanticTokenType::NAMESPACE,     // 10 (for module paths)
+    SemanticTokenType::PROPERTY,      // 11 (for metadata keys)
 ];
 
 pub const LEGEND_TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
@@ -141,146 +162,373 @@ pub fn tokens_to_lsp_data(text: &str, tokens: &mut [(ByteSpan, SymbolRole)]) -> 
     data
 }
 
-/// Compute Layer 0 structural tokens.
+// ── Keyword classification ──────────────────────────────────────────
+
+/// Core language forms that receive `KernelHead` highlighting.
+fn is_kernel_keyword(s: &str) -> bool {
+    matches!(s,
+        "def" | "touch" | "rule" | "sugar" | "let" | "begin" | "do"
+        | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
+        | "use" | "in" | "lambda" | "fn" | "if" | "cond" | "match" | "case"
+        | "cons" | "nil" | "set!" | "define" | "define-facet"
+        | "assert" | "assert-coherent" | "check" | "verify"
+        | "module" | "export" | "import" | "require"
+        | "context" | "goal" | "coherence"
+    )
+}
+
+/// Built-in constants that receive `FacetConst` highlighting.
+fn is_builtin_constant(s: &str) -> bool {
+    matches!(s, "true" | "false" | "nil" | "#t" | "#f")
+}
+
+/// Prelude / motivic operations that receive `Keyword` highlighting
+/// when used in call position.
+fn is_prelude_operation(s: &str) -> bool {
+    // H-series traces
+    s.ends_with("-trace")
+    || s.starts_with("check-")
+    || s.starts_with("assert-")
+    || s.starts_with("verify-")
+    // Grade / prelude namespace operations
+    || s.starts_with("grade/")
+    || s.starts_with("prelude/")
+    || s.starts_with("adjoint/")
+    || s.starts_with("facet/")
+    || s.starts_with("doctrine/")
+    // Specific well-known operations
+    || matches!(s,
+        "normalize" | "transport" | "coherent?" | "classify-reduction"
+        | "compose-recipes" | "check-diagram-coherence"
+        | "tensor" | "oplus" | "hom" | "eval" | "curry"
+        | "picard" | "tate" | "spectrum" | "d" | "pullback"
+    )
+}
+
+// ── Comment pre-pass ────────────────────────────────────────────────
+
+/// Scan text for `;` line comments before CST parsing (the lexer discards them).
+fn scan_comments(text: &str, out: &mut Vec<(ByteSpan, SymbolRole)>) {
+    let mut in_string = false;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_string => {
+                in_string = true;
+                i += 1;
+            }
+            b'"' if in_string => {
+                in_string = false;
+                i += 1;
+            }
+            b'\\' if in_string => {
+                i += 2; // skip escaped char
+            }
+            b';' if !in_string => {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                out.push((ByteSpan::new(start, i), SymbolRole::Comment));
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+}
+
+// ── Main entry point ────────────────────────────────────────────────
+
+/// Compute structural + semantic tokens for a `.maclane` document.
+///
+/// Layer 0: structural (parens, strings, numbers, comments)
+/// Layer 1: form-aware (def/rule/touch/sugar/use/in + call heads + meta variables)
 pub fn compute_layer0_structural(text: &str) -> Vec<(ByteSpan, SymbolRole)> {
     let mut tokens = Vec::new();
-    
-    // 1. Try CST parse
+
+    // Pre-pass: comments (lexer discards them, so we must scan separately)
+    scan_comments(text, &mut tokens);
+
+    // CST-based traversal for everything else
     if let Ok(module) = parser::parse_module(text) {
         for form in &module.body {
-            traverse_sexpr(form, &mut tokens);
+            traverse_sexpr(form, false, &mut tokens);
         }
     } else {
-        // Fallback: Lexical scan
+        // Fallback: lexical scan for broken files
         scan_fallback(text, &mut tokens);
     }
-    
+
     tokens
 }
 
-fn traverse_sexpr(expr: &SExpr, out: &mut Vec<(ByteSpan, SymbolRole)>) {
+// ── CST traversal ───────────────────────────────────────────────────
+
+/// Recursively traverse an s-expression, emitting highlight tokens.
+///
+/// `in_quote`: true when inside a `'(...)` or `` `(...)` `` — metadata context.
+fn traverse_sexpr(expr: &SExpr, in_quote: bool, out: &mut Vec<(ByteSpan, SymbolRole)>) {
     let span = expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
-    
+
     match &expr.kind {
         SExprKind::List(items) => {
-            // Check for special forms (Layer 1)
-            let head_str = if let Some(head) = items.first() {
+            // Extract head symbol if present
+            let head_str = items.first().and_then(|head| {
                 if let SExprKind::Atom(Atom::Symbol(s)) = &head.kind {
                     Some(s.as_str())
                 } else {
                     None
                 }
-            } else {
-                None
-            };
-            
+            });
+
+            // Inside quoted metadata: highlight keys as Property
+            if in_quote {
+                if let Some(head) = head_str {
+                    if matches!(head, "meta" | "priority" | "kind" | "proof" | "law"
+                        | "provenance" | "axiom" | "theorem" | "classes") {
+                        emit(items.first().unwrap(), SymbolRole::Property, out);
+                        for item in items.iter().skip(1) {
+                            traverse_sexpr(item, true, out);
+                        }
+                        return;
+                    }
+                }
+                // Generic quoted list — traverse children in quote context
+                for item in items {
+                    traverse_sexpr(item, true, out);
+                }
+                return;
+            }
+
             if let Some(head) = head_str {
                 match head {
-                    "def" => {
-                        // (def name type value) or (def name value)
-                        // Highlight 'def' as KernelHead
-                        
-                        // We can manually push KernelHead for items[0] if we want to override default behavior
-                        // But traverse_sexpr recursively calls.
-                        // Better: handle items manually here.
-                        handle_special_form_head(&items[0], SymbolRole::KernelHead, out);
-                        
+                    // ── (def name ...) ──
+                    "def" | "define" | "define-facet" => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
                         if items.len() > 1 {
-                            // Name is Definition
-                            handle_special_form_head(&items[1], SymbolRole::Definition, out);
+                            emit(&items[1], SymbolRole::Definition, out);
                         }
-                        // Rest are normal
                         for item in items.iter().skip(2) {
-                            traverse_sexpr(item, out);
+                            traverse_sexpr(item, false, out);
                         }
                         return;
                     }
+
+                    // ── (touch name [type]) ──
                     "touch" => {
-                        // (touch name type) or (touch name)
-                        handle_special_form_head(&items[0], SymbolRole::KernelHead, out);
+                        emit(&items[0], SymbolRole::KernelHead, out);
                         if items.len() > 1 {
-                            handle_special_form_head(&items[1], SymbolRole::Binder, out);
+                            emit(&items[1], SymbolRole::Binder, out);
                         }
                         for item in items.iter().skip(2) {
-                            traverse_sexpr(item, out);
+                            traverse_sexpr(item, false, out);
                         }
                         return;
                     }
+
+                    // ── (rule name LHS RHS ['(meta ...)]) ──
                     "rule" => {
-                        // (rule name (params...) LHS RHS)
-                        handle_special_form_head(&items[0], SymbolRole::KernelHead, out);
+                        emit(&items[0], SymbolRole::KernelHead, out);
                         if items.len() > 1 {
-                            handle_special_form_head(&items[1], SymbolRole::RuleName, out);
+                            emit(&items[1], SymbolRole::RuleName, out);
                         }
-                        // TODO: Handle binders in param list?
                         for item in items.iter().skip(2) {
-                            traverse_sexpr(item, out);
+                            traverse_sexpr(item, false, out);
                         }
                         return;
                     }
+
+                    // ── (sugar name pattern template) ──
+                    "sugar" => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
+                        if items.len() > 1 {
+                            emit(&items[1], SymbolRole::RuleName, out);
+                        }
+                        for item in items.iter().skip(2) {
+                            traverse_sexpr(item, false, out);
+                        }
+                        return;
+                    }
+
+                    // ── (use Module::Path symbol [as alias]) ──
+                    "use" => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
+                        // Module path segments get Namespace highlighting
+                        if items.len() > 1 {
+                            emit(&items[1], SymbolRole::Namespace, out);
+                        }
+                        // Imported symbol
+                        if items.len() > 2 {
+                            emit(&items[2], SymbolRole::Definition, out);
+                        }
+                        // "as" keyword
+                        if items.len() > 3 {
+                            if let SExprKind::Atom(Atom::Symbol(s)) = &items[3].kind {
+                                if s == "as" {
+                                    emit(&items[3], SymbolRole::KernelHead, out);
+                                    if items.len() > 4 {
+                                        emit(&items[4], SymbolRole::Definition, out);
+                                    }
+                                }
+                            }
+                        }
+                        return;
+                    }
+
+                    // ── (in doctrine-name body...) ──
+                    "in" => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
+                        if items.len() > 1 {
+                            emit(&items[1], SymbolRole::FacetSort, out);
+                        }
+                        for item in items.iter().skip(2) {
+                            traverse_sexpr(item, false, out);
+                        }
+                        return;
+                    }
+
+                    // ── (lambda/fn (params...) body...) ──
+                    "lambda" | "fn" => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
+                        // Highlight parameter list entries as binders
+                        if items.len() > 1 {
+                            if let SExprKind::List(params) = &items[1].kind {
+                                for p in params {
+                                    emit(p, SymbolRole::Binder, out);
+                                }
+                            } else {
+                                emit(&items[1], SymbolRole::Binder, out);
+                            }
+                        }
+                        for item in items.iter().skip(2) {
+                            traverse_sexpr(item, false, out);
+                        }
+                        return;
+                    }
+
+                    // ── (let (bindings...) body) ──
                     "let" => {
-                        handle_special_form_head(&items[0], SymbolRole::KernelHead, out);
-                        // (let (binders...) body...)
-                        // or (let name val body...)
-                        for item in items.iter().skip(1) {
-                            traverse_sexpr(item, out);
+                        emit(&items[0], SymbolRole::KernelHead, out);
+                        // If second item is a list, treat odd entries as binders
+                        if items.len() > 1 {
+                            if let SExprKind::List(bindings) = &items[1].kind {
+                                for (i, b) in bindings.iter().enumerate() {
+                                    if i % 2 == 0 {
+                                        emit(b, SymbolRole::Binder, out);
+                                    } else {
+                                        traverse_sexpr(b, false, out);
+                                    }
+                                }
+                            } else {
+                                // (let name val body...) — name as binder
+                                emit(&items[1], SymbolRole::Binder, out);
+                            }
+                        }
+                        for item in items.iter().skip(2) {
+                            traverse_sexpr(item, false, out);
                         }
                         return;
                     }
-                    "quote" | "quasiquote" | "unquote" | "unquote-splicing" | "begin" | "do" => {
-                        handle_special_form_head(&items[0], SymbolRole::KernelHead, out);
+
+                    // ── Other kernel keywords: begin, do, if, cond, match, ... ──
+                    kw if is_kernel_keyword(kw) => {
+                        emit(&items[0], SymbolRole::KernelHead, out);
                         for item in items.iter().skip(1) {
-                            traverse_sexpr(item, out);
+                            traverse_sexpr(item, false, out);
                         }
                         return;
                     }
-                    _ => {}
+
+                    // ── Prelude / motivic operations in call position ──
+                    op if is_prelude_operation(op) => {
+                        emit(&items[0], SymbolRole::Keyword, out);
+                        for item in items.iter().skip(1) {
+                            traverse_sexpr(item, false, out);
+                        }
+                        return;
+                    }
+
+                    // ── Generic function call: (f args...) ──
+                    _ => {
+                        emit(&items[0], SymbolRole::FacetOp, out);
+                        for item in items.iter().skip(1) {
+                            traverse_sexpr(item, false, out);
+                        }
+                        return;
+                    }
                 }
             }
-            
-            // Standard list traversal
-            for (i, item) in items.iter().enumerate() {
-                if i == 0 && head_str.is_some() {
-                     // Ensure the head is handled. If not special, it might be a function call (FacetOp?)
-                     // For Layer 1, if it's not a keyword, we treat as Unknown or Function?
-                     // Spec says "List head position". 
-                     // We'll let recursive call handle it as Atom::Symbol -> Unknown
-                     // But we could optimistically mark as Function?
-                     // Let's stick to traversing.
-                     traverse_sexpr(item, out);
-                } else {
-                    traverse_sexpr(item, out);
-                }
+
+            // No head symbol (e.g. nested list, empty list) — traverse children
+            for item in items {
+                traverse_sexpr(item, in_quote, out);
             }
         }
+
         SExprKind::Atom(atom) => {
-            let role = match atom {
-                Atom::String(_) => SymbolRole::String,
-                Atom::Integer(_) => SymbolRole::Number,
-                Atom::Symbol(s) => {
-                    if s.starts_with('?') {
-                        SymbolRole::Meta
-                    } else if s.starts_with('"') { 
-                        SymbolRole::String 
-                    } else if s.chars().all(|c| c.is_digit(10)) {
-                        SymbolRole::Number
-                    } else {
-                        SymbolRole::Unknown
+            let role = if in_quote {
+                // Inside quoted form: atoms are metadata values
+                match atom {
+                    Atom::String(_) => SymbolRole::String,
+                    Atom::Integer(_) => SymbolRole::Number,
+                    Atom::Symbol(s) => {
+                        if is_metadata_key(s) {
+                            SymbolRole::Property
+                        } else {
+                            SymbolRole::String // treat quoted symbols as string-like
+                        }
                     }
                 }
-
+            } else {
+                match atom {
+                    Atom::String(_) => SymbolRole::String,
+                    Atom::Integer(_) => SymbolRole::Number,
+                    Atom::Symbol(s) => classify_symbol(s),
+                }
             };
             out.push((span, role));
         }
-        SExprKind::Quote(inner) | SExprKind::QuasiQuote(inner) | SExprKind::Unquote(inner) | SExprKind::UnquoteSplicing(inner) => {
-            out.push((span, SymbolRole::KernelHead)); // The quote char itself is a kernel head syntax
-            traverse_sexpr(inner, out);
+
+        SExprKind::Quote(inner) | SExprKind::QuasiQuote(inner) => {
+            // Enter quoted/metadata context
+            traverse_sexpr(inner, true, out);
+        }
+
+        SExprKind::Unquote(inner) | SExprKind::UnquoteSplicing(inner) => {
+            // Unquote exits the quoted context back to code
+            traverse_sexpr(inner, false, out);
         }
     }
 }
 
-fn handle_special_form_head(expr: &SExpr, role: SymbolRole, out: &mut Vec<(ByteSpan, SymbolRole)>) {
-    // Helper to force a role on an expression (usually an atom)
+/// Classify a bare symbol by its shape.
+fn classify_symbol(s: &str) -> SymbolRole {
+    if s.starts_with('?') {
+        SymbolRole::Meta           // pattern variable: ?x, ?*xs
+    } else if is_builtin_constant(s) {
+        SymbolRole::FacetConst     // true, false, nil
+    } else if s.contains("::") {
+        SymbolRole::Namespace      // Module::Path references
+    } else if s.starts_with('#') {
+        SymbolRole::KernelHead     // #![ambient_doctrine ...]
+    } else {
+        SymbolRole::Unknown
+    }
+}
+
+/// Check if a symbol is a recognized metadata key (inside quoted forms).
+fn is_metadata_key(s: &str) -> bool {
+    matches!(s,
+        "meta" | "priority" | "kind" | "proof" | "law" | "provenance"
+        | "axiom" | "theorem" | "lemma" | "corollary" | "classes"
+        | "type" | "doctrine" | "origin" | "certified" | "structural"
+    )
+}
+
+/// Emit a token with the given role for an expression.
+fn emit(expr: &SExpr, role: SymbolRole, out: &mut Vec<(ByteSpan, SymbolRole)>) {
     let span = expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
     out.push((span, role));
 }

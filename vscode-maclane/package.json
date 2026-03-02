@@ -1,0 +1,154 @@
+{
+  "name": "maclane-lang",
+  "displayName": "Mac Lane",
+  "description": "Language support for Mac Lane (.maclane) — rewriting-based proof engine",
+  "version": "0.1.0",
+  "publisher": "maclane",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:maclane"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "maclane",
+        "aliases": [
+          "Mac Lane",
+          "maclane",
+          "Comrade Lisp"
+        ],
+        "extensions": [
+          ".maclane"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "maclane",
+        "scopeName": "source.maclane",
+        "path": "./syntaxes/maclane.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Mac Lane",
+      "properties": {
+        "maclane.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the EdgeLorD LSP server binary. If empty, searches PATH for 'edgelord-lsp'."
+        },
+        "maclane.server.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments to pass to the LSP server."
+        },
+        "maclane.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the EdgeLorD language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "maclane.restartServer",
+        "title": "Mac Lane: Restart Language Server"
+      },
+      {
+        "command": "maclane.showGoals",
+        "title": "Mac Lane: Show Goals (Output Channel)"
+      },
+      {
+        "command": "maclane.showGoalsPanel",
+        "title": "Mac Lane: Show Goals Panel",
+        "icon": "$(symbol-boolean)"
+      },
+      {
+        "command": "maclane.stepForward",
+        "title": "Mac Lane: Step Forward"
+      },
+      {
+        "command": "maclane.stepBackward",
+        "title": "Mac Lane: Step Backward"
+      },
+      {
+        "command": "maclane.gotoCursor",
+        "title": "Mac Lane: Check Up To Cursor"
+      },
+      {
+        "command": "maclane.undoStep",
+        "title": "Mac Lane: Undo Proof Step"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "edgelord.goalsPanel",
+          "name": "Mac Lane Goals",
+          "when": "resourceLangId == maclane"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "maclane.stepForward",
+        "key": "ctrl+]",
+        "mac": "cmd+]",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.stepBackward",
+        "key": "ctrl+[",
+        "mac": "cmd+[",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.gotoCursor",
+        "key": "ctrl+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.undoStep",
+        "key": "ctrl+shift+u",
+        "mac": "cmd+shift+u",
+        "when": "editorTextFocus && editorLangId == maclane"
+      },
+      {
+        "command": "maclane.showGoalsPanel",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g",
+        "when": "editorLangId == maclane"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

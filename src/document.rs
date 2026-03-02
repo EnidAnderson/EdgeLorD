@@ -157,6 +157,27 @@ impl ParsedDocument {
             .find(|goal| goal.span.contains_offset(offset))
     }
 
+    /// Return the byte offset at the **end** of each top-level form.
+    ///
+    /// These are the valid checked-boundary positions for proof stepping
+    /// (SB0). The list is deterministically sorted and deduplicated.
+    ///
+    /// **INV D-*:** deterministic — nodes are added in source order in
+    /// `add_expr_node`, so `nodes[0].children` iteration order is stable.
+    pub fn top_level_form_boundaries(&self) -> Vec<usize> {
+        if self.nodes.len() <= 1 {
+            return Vec::new();
+        }
+        let mut ends: Vec<usize> = self.nodes[0]
+            .children
+            .iter()
+            .map(|&c| self.nodes[c].span.end)
+            .collect();
+        ends.sort_unstable();
+        ends.dedup();
+        ends
+    }
+
     pub fn goal_inlay_hints_in_range(&self, range: ByteSpan) -> Vec<GoalInlayHint> {
         let mut hints = self
             .goals
@@ -544,4 +565,366 @@ pub fn top_level_symbols(text: &str) -> Vec<(String, ByteSpan)> {
         out.push((label, span));
     }
     out
+}
+
+// ── Symbol Index ────────────────────────────────────────────────────
+
+/// The kind of definition a symbol represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SymbolDefKind {
+    Touch,
+    Def,
+    Rule,
+    Sugar,
+    Let,
+    Lambda,
+    Import,
+}
+
+/// A symbol definition in the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDef {
+    pub name: String,
+    pub kind: SymbolDefKind,
+    /// Span of the name itself (for goto-definition targets)
+    pub name_span: ByteSpan,
+    /// Span of the entire form (for document symbols)
+    pub form_span: ByteSpan,
+    /// Optional detail (e.g. the form head or type annotation preview)
+    pub detail: Option<String>,
+}
+
+/// A reference (usage) of a symbol in the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRef {
+    pub name: String,
+    pub span: ByteSpan,
+}
+
+/// Complete symbol index for a document — definitions + references.
+#[derive(Debug, Clone)]
+pub struct SymbolIndex {
+    /// All definitions in the document (sorted by position).
+    pub definitions: Vec<SymbolDef>,
+    /// All symbol references/usages in the document (sorted by position).
+    pub references: Vec<SymbolRef>,
+}
+
+impl SymbolIndex {
+    /// Build a symbol index from document text.
+    pub fn build(text: &str) -> Self {
+        let mut definitions = Vec::new();
+        let mut references = Vec::new();
+
+        if let Ok(module) = parser::parse_module(text) {
+            for form in &module.body {
+                index_sexpr(form, false, &mut definitions, &mut references);
+            }
+        }
+
+        // INV D-*: deterministic ordering
+        definitions.sort_by_key(|d| d.name_span.start);
+        references.sort_by_key(|r| r.span.start);
+
+        SymbolIndex { definitions, references }
+    }
+
+    /// Find the definition of a symbol by name.
+    pub fn find_definition(&self, name: &str) -> Option<&SymbolDef> {
+        self.definitions.iter().find(|d| d.name == name)
+    }
+
+    /// Find all references to a symbol by name.
+    pub fn find_references(&self, name: &str) -> Vec<&SymbolRef> {
+        self.references.iter().filter(|r| r.name == name).collect()
+    }
+
+    /// Find the definition at a given offset (cursor on definition name).
+    pub fn definition_at_offset(&self, offset: usize) -> Option<&SymbolDef> {
+        self.definitions.iter().find(|d| d.name_span.contains_offset(offset))
+    }
+
+    /// Find the reference at a given offset (cursor on a usage).
+    pub fn reference_at_offset(&self, offset: usize) -> Option<&SymbolRef> {
+        self.references.iter().find(|r| r.span.contains_offset(offset))
+    }
+
+    /// Get all unique symbol names that are defined in this document.
+    pub fn defined_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.definitions.iter().map(|d| d.name.as_str()).collect();
+        names.dedup();
+        names
+    }
+
+    /// Get completion candidates: all definitions + referenced names (deduplicated).
+    pub fn completion_candidates(&self) -> Vec<(&str, Option<SymbolDefKind>)> {
+        let mut seen = BTreeSet::new();
+        let mut candidates = Vec::new();
+
+        for def in &self.definitions {
+            if seen.insert(def.name.as_str()) {
+                candidates.push((def.name.as_str(), Some(def.kind)));
+            }
+        }
+        for r in &self.references {
+            if seen.insert(r.name.as_str()) {
+                candidates.push((r.name.as_str(), None));
+            }
+        }
+        candidates
+    }
+}
+
+/// Recursively walk an s-expression collecting definitions and references.
+fn index_sexpr(
+    expr: &SExpr,
+    in_quote: bool,
+    defs: &mut Vec<SymbolDef>,
+    refs: &mut Vec<SymbolRef>,
+) {
+    let form_span = expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+
+    match &expr.kind {
+        SExprKind::List(items) if !in_quote => {
+            let head_str = items.first().and_then(|h| {
+                if let SExprKind::Atom(Atom::Symbol(s)) = &h.kind { Some(s.as_str()) } else { None }
+            });
+
+            match head_str {
+                // (def name body) / (define name body)
+                Some("def") | Some("define") | Some("define-facet") => {
+                    if let Some(name_expr) = items.get(1) {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &name_expr.kind {
+                            let name_span = name_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                            defs.push(SymbolDef {
+                                name: name.clone(),
+                                kind: SymbolDefKind::Def,
+                                name_span,
+                                form_span,
+                                detail: Some("def".to_string()),
+                            });
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // (touch name [type])
+                Some("touch") => {
+                    if let Some(name_expr) = items.get(1) {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &name_expr.kind {
+                            let name_span = name_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                            defs.push(SymbolDef {
+                                name: name.clone(),
+                                kind: SymbolDefKind::Touch,
+                                name_span,
+                                form_span,
+                                detail: Some("touch".to_string()),
+                            });
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // (rule name LHS RHS [meta])
+                Some("rule") => {
+                    if let Some(name_expr) = items.get(1) {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &name_expr.kind {
+                            let name_span = name_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                            defs.push(SymbolDef {
+                                name: name.clone(),
+                                kind: SymbolDefKind::Rule,
+                                name_span,
+                                form_span,
+                                detail: Some("rule".to_string()),
+                            });
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // (sugar name pattern template)
+                Some("sugar") => {
+                    if let Some(name_expr) = items.get(1) {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &name_expr.kind {
+                            let name_span = name_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                            defs.push(SymbolDef {
+                                name: name.clone(),
+                                kind: SymbolDefKind::Sugar,
+                                name_span,
+                                form_span,
+                                detail: Some("sugar".to_string()),
+                            });
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // (use Module::Path symbol [as alias])
+                Some("use") => {
+                    // The imported symbol is a definition in this file's scope
+                    if let Some(sym_expr) = items.get(2) {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &sym_expr.kind {
+                            let name_span = sym_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                            defs.push(SymbolDef {
+                                name: name.clone(),
+                                kind: SymbolDefKind::Import,
+                                name_span,
+                                form_span,
+                                detail: items.get(1).and_then(|m| {
+                                    if let SExprKind::Atom(Atom::Symbol(s)) = &m.kind { Some(format!("use {}", s)) } else { None }
+                                }),
+                            });
+                        }
+                    }
+                    // Check for alias: (use M::P sym as alias)
+                    if items.len() > 4 {
+                        if let (Some(as_kw), Some(alias_expr)) = (items.get(3), items.get(4)) {
+                            if let SExprKind::Atom(Atom::Symbol(kw)) = &as_kw.kind {
+                                if kw == "as" {
+                                    if let SExprKind::Atom(Atom::Symbol(alias)) = &alias_expr.kind {
+                                        let alias_span = alias_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                                        defs.push(SymbolDef {
+                                            name: alias.clone(),
+                                            kind: SymbolDefKind::Import,
+                                            name_span: alias_span,
+                                            form_span,
+                                            detail: Some(format!("alias")),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // (let (name val ...) body) or (let name val body)
+                Some("let") => {
+                    if let Some(bindings_expr) = items.get(1) {
+                        match &bindings_expr.kind {
+                            SExprKind::List(bindings) => {
+                                for (i, b) in bindings.iter().enumerate() {
+                                    if i % 2 == 0 {
+                                        if let SExprKind::Atom(Atom::Symbol(name)) = &b.kind {
+                                            let name_span = b.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                                            defs.push(SymbolDef {
+                                                name: name.clone(),
+                                                kind: SymbolDefKind::Let,
+                                                name_span,
+                                                form_span,
+                                                detail: Some("let".to_string()),
+                                            });
+                                        }
+                                    } else {
+                                        index_sexpr(b, false, defs, refs);
+                                    }
+                                }
+                            }
+                            SExprKind::Atom(Atom::Symbol(name)) => {
+                                let name_span = bindings_expr.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                                defs.push(SymbolDef {
+                                    name: name.clone(),
+                                    kind: SymbolDefKind::Let,
+                                    name_span,
+                                    form_span,
+                                    detail: Some("let".to_string()),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // (lambda/fn (params...) body...)
+                Some("lambda") | Some("fn") => {
+                    if let Some(params_expr) = items.get(1) {
+                        if let SExprKind::List(params) = &params_expr.kind {
+                            for p in params {
+                                if let SExprKind::Atom(Atom::Symbol(name)) = &p.kind {
+                                    let name_span = p.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                                    defs.push(SymbolDef {
+                                        name: name.clone(),
+                                        kind: SymbolDefKind::Lambda,
+                                        name_span,
+                                        form_span,
+                                        detail: Some("param".to_string()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+
+                // Other forms: head is a reference, recurse into args
+                _ => {
+                    // Head of a call is a reference
+                    if let Some(head) = items.first() {
+                        if let SExprKind::Atom(Atom::Symbol(name)) = &head.kind {
+                            // Don't record kernel keywords as references
+                            if !is_keyword(name) {
+                                let span = head.span.map(|s| ByteSpan::new(s.start, s.end)).unwrap_or(ByteSpan::new(0, 0));
+                                refs.push(SymbolRef { name: name.clone(), span });
+                            }
+                        }
+                    }
+                    for item in items.iter().skip(1) {
+                        index_sexpr(item, false, defs, refs);
+                    }
+                }
+            }
+        }
+
+        SExprKind::Atom(Atom::Symbol(name)) if !in_quote => {
+            // A bare symbol is a reference (unless it starts with ? which is a meta/hole)
+            if !name.starts_with('?') && !is_keyword(name) && !is_constant(name) {
+                refs.push(SymbolRef {
+                    name: name.clone(),
+                    span: form_span,
+                });
+            }
+        }
+
+        SExprKind::Quote(inner) | SExprKind::QuasiQuote(inner) => {
+            // Inside quote: don't collect refs (metadata), but recurse shallowly
+            index_sexpr(inner, true, defs, refs);
+        }
+
+        SExprKind::Unquote(inner) | SExprKind::UnquoteSplicing(inner) => {
+            // Back to code context
+            index_sexpr(inner, false, defs, refs);
+        }
+
+        // Quoted list, atoms in quote, numbers, strings — skip
+        _ => {}
+    }
+}
+
+fn is_keyword(s: &str) -> bool {
+    matches!(s,
+        "def" | "define" | "define-facet" | "touch" | "rule" | "sugar"
+        | "let" | "begin" | "do" | "if" | "cond" | "match" | "case"
+        | "lambda" | "fn" | "use" | "in" | "quote" | "quasiquote"
+        | "unquote" | "unquote-splicing" | "cons" | "set!"
+        | "assert" | "assert-coherent" | "check" | "verify"
+        | "module" | "export" | "import" | "require"
+        | "context" | "goal" | "coherence" | "as"
+        | "grade" | "transport"
+    )
+}
+
+fn is_constant(s: &str) -> bool {
+    matches!(s, "true" | "false" | "nil" | "#t" | "#f")
 }

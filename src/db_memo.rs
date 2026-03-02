@@ -129,7 +129,8 @@ mod tests {
         let mut snapshot = std::collections::BTreeMap::new();
         snapshot.insert("file:///test.ml".to_string(), b"content".to_vec());
 
-        let input = CompileInputV1::new(b"test".to_vec(), opts, snapshot, 12345);
+        let file_identity = HashValue::hash_with_domain(b"URI_ID", b"file:///test.ml");
+        let input = CompileInputV1::new(b"test".to_vec(), opts, snapshot, file_identity);
 
         // For now, DbMemo will always call compute since SniperDB API not exposed
         // This test documents that behavior
