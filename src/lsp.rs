@@ -3695,4 +3695,168 @@ mod tests {
         let steps = extract_trace_steps(term);
         assert_eq!(steps, None);
     }
+
+    // =========================================================================
+    // Tests: extract_para_info_payload (INV S-* structural detection)
+    // =========================================================================
+
+    fn minimal_proof_state_no_para_info() -> comrade_lisp::proof_state::ProofState {
+        comrade_lisp::proof_state::ProofState::empty()
+    }
+
+    fn make_goal_with_ctx_entry(entry_name: &str) -> comrade_lisp::proof_state::GoalState {
+        use comrade_lisp::proof_state::{
+            CtxEntry, GoalState, GoalStatus, HoleOwner, LocalContext, MorMetaId, MorType,
+            ObjExpr, ObjMetaId,
+        };
+        use tcb_core::id_minting::ScopeKey;
+
+        let ctx_entry = CtxEntry {
+            name: entry_name.to_string(),
+            ty: None,
+            def: None,
+            value_def: None,
+            span: None,
+            source_module: None,
+            origin_doctrine: None,
+            binder_slot: 0,
+            scope_key: ScopeKey([0u8; 32]),
+        };
+
+        GoalState {
+            id: MorMetaId(0),
+            name: "test_goal".to_string(),
+            owner: HoleOwner::TopLevel { form_index: 0 },
+            ordinal: 0,
+            span: None,
+            local_context: LocalContext {
+                entries: vec![ctx_entry],
+                doctrine: None,
+            },
+            expected_type: MorType {
+                src: ObjExpr::Meta(ObjMetaId(0)),
+                dst: ObjExpr::Meta(ObjMetaId(1)),
+            },
+            status: GoalStatus::Unsolved,
+            relevant_constraints: vec![],
+        }
+    }
+
+    /// INV S-*: extract_para_info_payload detects structural name "para-info" in local ctx.
+    #[test]
+    fn extract_para_info_returns_some_for_local_context_entry() {
+        use comrade_lisp::proof_state::ProofState;
+
+        let mut ps = ProofState::empty();
+        ps.goals.push(make_goal_with_ctx_entry("para-info"));
+
+        let result = extract_para_info_payload(&ps);
+        assert!(
+            result.is_some(),
+            "must detect 'para-info' binder in local context (INV S-*)"
+        );
+        // Canonical bytes must be non-empty
+        assert!(!result.unwrap().is_empty());
+    }
+
+    /// INV S-*: unrelated binder names must NOT trigger para-info detection.
+    #[test]
+    fn extract_para_info_returns_none_for_unrelated_ctx_entries() {
+        use comrade_lisp::proof_state::ProofState;
+
+        let mut ps = ProofState::empty();
+        ps.goals.push(make_goal_with_ctx_entry("some-other-name"));
+        ps.goals.push(make_goal_with_ctx_entry("para_info")); // underscore, not hyphen
+        ps.goals.push(make_goal_with_ctx_entry("PARA-INFO")); // wrong case
+
+        let result = extract_para_info_payload(&ps);
+        assert!(
+            result.is_none(),
+            "must NOT detect spurious names as 'para-info' (INV S-*)"
+        );
+    }
+
+    /// INV S-*: empty ProofState → None.
+    #[test]
+    fn extract_para_info_returns_none_for_empty_proof_state() {
+        let ps = minimal_proof_state_no_para_info();
+        assert!(
+            extract_para_info_payload(&ps).is_none(),
+            "empty proof state must not trigger para-info detection"
+        );
+    }
+
+    /// INV S-*: MorExpr::Ref("para-info") inside a HasType constraint → Some.
+    #[test]
+    fn extract_para_info_returns_some_for_hastype_constraint_ref() {
+        use comrade_lisp::proof_state::{
+            Constraint, ConstraintId, ConstraintKind, ConstraintReason, MorExpr, MorType,
+            ObjExpr, ObjMetaId, ProofState,
+        };
+
+        let mut ps = ProofState::empty();
+        ps.constraints.push(Constraint {
+            id: ConstraintId(0),
+            kind: ConstraintKind::HasType {
+                m: MorExpr::Ref("para-info".to_string()),
+                ty: MorType {
+                    src: ObjExpr::Meta(ObjMetaId(0)),
+                    dst: ObjExpr::Meta(ObjMetaId(1)),
+                },
+            },
+            span: None,
+            reason: ConstraintReason::Inferred,
+        });
+
+        let result = extract_para_info_payload(&ps);
+        assert!(
+            result.is_some(),
+            "must detect Ref('para-info') in HasType constraint (INV S-*)"
+        );
+    }
+
+    /// INV S-*: MorExpr::Ref("para-info") nested in Compose inside MorEq → Some.
+    #[test]
+    fn extract_para_info_returns_some_for_moreq_with_nested_compose() {
+        use comrade_lisp::proof_state::{
+            Constraint, ConstraintId, ConstraintKind, ConstraintReason, MorExpr, MorMetaId,
+            ProofState,
+        };
+
+        let nested = MorExpr::Compose(vec![
+            MorExpr::Meta(MorMetaId(0)),
+            MorExpr::Ref("para-info".to_string()),
+        ]);
+
+        let mut ps = ProofState::empty();
+        ps.constraints.push(Constraint {
+            id: ConstraintId(1),
+            kind: ConstraintKind::MorEq {
+                a: MorExpr::Meta(MorMetaId(1)),
+                b: nested,
+            },
+            span: None,
+            reason: ConstraintReason::RuleBoundary,
+        });
+
+        let result = extract_para_info_payload(&ps);
+        assert!(
+            result.is_some(),
+            "must detect nested Ref('para-info') in MorEq Compose (INV S-*)"
+        );
+    }
+
+    /// INV D-*: two identical ProofStates produce identical canonical bytes.
+    #[test]
+    fn extract_para_info_canonical_bytes_are_deterministic() {
+        use comrade_lisp::proof_state::ProofState;
+
+        let mut ps = ProofState::empty();
+        ps.goals.push(make_goal_with_ctx_entry("para-info"));
+
+        let r1 = extract_para_info_payload(&ps);
+        let r2 = extract_para_info_payload(&ps);
+        assert_eq!(r1, r2, "canonical bytes must be deterministic (INV D-*)");
+    }
 }
+

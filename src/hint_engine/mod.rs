@@ -620,8 +620,8 @@ mod tests {
         let total = MAX_FP_BUCKETS + 10;
         let mut csv = "epoch_ms,proof_state_fp,tactic_id,applied\n".to_string();
         for i in 0..total {
-            // Each fingerprint is a unique 64-char hex string (padded with zeros)
-            let fp = format!("{:0>64}", format!("fp_{:04}", i));
+            // Each fingerprint is a unique 64-char hex string (unique part at start)
+            let fp = format!("{:0<64}", format!("fp_{:04}", i));
             csv.push_str(&format!("0,{},std.rewrite,1\n", fp));
         }
         std::fs::write(&log_path, &csv).unwrap();
